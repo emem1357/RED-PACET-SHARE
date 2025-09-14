@@ -9,6 +9,9 @@ const bot = new Telegraf(process.env.BOT_TOKEN);
 const { Pool } = pkg;
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
+// 🔐 معرف الأدمن (انت فقط)
+const ADMIN_ID = 6305481147;
+
 // ====== قاعدة البيانات ======
 async function initDB() {
   await q(`
@@ -63,6 +66,9 @@ async function q(sql, params) {
 const userState = {};
 const GROUP_SIZE = parseInt(process.env.GROUP_SIZE || "1000");
 
+// 🆕 فلاغ لمعرفة إن الأدمن بيكتب رسالة بث
+let adminBroadcastMode = false;
+
 // ====== حساب رقم المجموعة ======
 async function assignGroup() {
   const res = await q(`SELECT COUNT(*) FROM users`);
@@ -79,22 +85,22 @@ async function autoNameInGroup(groupId) {
 
 // ====== ✅ لوحة الأزرار الرئيسية ======
 const mainKeyboard = Markup.keyboard([
-  ["/register", "/upload_codes"],
-  ["/today", "/mycodes"],
+  ["/تسجيل", "/رفع_اكواد"],
+  ["/اكواد_اليوم", "/اكوادى"],
   [{ text: "📱 إرسال رقم الهاتف", request_contact: true }],
-  ["/help"]
+  ["/مساعدة"]
 ]).resize();
 
 // ====== ✅ أمر /start ======
 bot.start((ctx) => {
   ctx.reply(
-    "👋 أهلاً بك في البوت!\n\nاستخدم الأزرار بالأسفل أو الأوامر التالية:\n/register - للتسجيل\n/upload_codes - لرفع الأكواد\n/today - لعرض أكواد اليوم\n/mycodes - لعرض الأكواد الخاصة بك",
+    "👋 أهلاً بك في البوت!\n\nاستخدم الأزرار بالأسفل أو الأوامر التالية:\n/تسجيل - للتسجيل\n/رفع_اكواد - لرفع الأكواد\n/اكواد_اليوم - لعرض أكواد اليوم\n/اكوادى - لعرض الأكواد الخاصة بك",
     mainKeyboard
   );
 });
 
 // ====== تسجيل جديد ======
-bot.command('register', async (ctx) => {
+bot.command('تسجيل', async (ctx) => {
   const tgId = ctx.from.id;
 
   const exists = await q(`SELECT id FROM users WHERE telegram_id=$1`, [tgId]);
@@ -107,9 +113,32 @@ bot.command('register', async (ctx) => {
   await ctx.reply("أدخل معرف بينانس الخاص بك:");
 });
 
-// ====== استلام معرف بينانس ======
+// ====== استلام أي رسالة ======
 bot.on('text', async (ctx) => {
   const uid = ctx.from.id;
+
+  // 🆕 لو الأدمن في وضع البث
+  if (uid === ADMIN_ID && adminBroadcastMode) {
+    adminBroadcastMode = false; // رجع للوضع الطبيعي
+
+    const message = ctx.message.text;
+    const users = await q(`SELECT telegram_id FROM users`);
+
+    let success = 0;
+    for (const row of users.rows) {
+      try {
+        await bot.telegram.sendMessage(row.telegram_id, `📢 رسالة من الأدمن:\n\n${message}`);
+        success++;
+      } catch (err) {
+        console.error(`❌ فشل إرسال الرسالة للمستخدم ${row.telegram_id}:`, err.message);
+      }
+    }
+
+    await ctx.reply(`✅ تم إرسال الرسالة إلى ${success} مستخدم بنجاح.`);
+    return;
+  }
+
+  // 👇 باقي الكود القديم الخاص بالـ userState
   const st = userState[uid];
   if (!st) return;
 
@@ -157,7 +186,7 @@ bot.on('contact', async (ctx) => {
   const tgId = ctx.from.id;
   const st = userState[tgId];
   if (!st || st.stage !== 'awaiting_phone') {
-    await ctx.reply("ابدأ التسجيل بكتابة /register");
+    await ctx.reply("ابدأ التسجيل بكتابة /تسجيل");
     return;
   }
 
@@ -184,11 +213,11 @@ bot.on('contact', async (ctx) => {
 });
 
 // ====== رفع الأكواد ======
-bot.command('upload_codes', async (ctx) => {
+bot.command('رفع_اكواد', async (ctx) => {
   const uid = ctx.from.id;
   const res = await q('SELECT id FROM users WHERE telegram_id=$1', [uid]);
   if (res.rowCount === 0) {
-    await ctx.reply("سجل أولًا باستخدام /register");
+    await ctx.reply("سجل أولًا باستخدام /تسجيل");
     return;
   }
   userState[uid] = { stage: 'uploading_codes', codes: [] };
@@ -196,11 +225,11 @@ bot.command('upload_codes', async (ctx) => {
 });
 
 // ====== عرض أكواد اليوم ======
-bot.command('today', async (ctx) => {
+bot.command('اكواد_اليوم', async (ctx) => {
   const uid = ctx.from.id;
   const u = await q('SELECT id, auto_name FROM users WHERE telegram_id=$1', [uid]);
   if (u.rowCount === 0) {
-    await ctx.reply("سجل أولًا باستخدام /register");
+    await ctx.reply("سجل أولًا باستخدام /تسجيل");
     return;
   }
   const userId = u.rows[0].id;
@@ -223,11 +252,11 @@ bot.command('today', async (ctx) => {
 });
 
 // ====== عرض الأكواد الخاصة بالمستخدم ======
-bot.command('mycodes', async (ctx) => {
+bot.command('اكوادى', async (ctx) => {
   const uid = ctx.from.id;
   const res = await q('SELECT id FROM users WHERE telegram_id=$1', [uid]);
   if (res.rowCount === 0) {
-    await ctx.reply("سجل أولًا باستخدام /register");
+    await ctx.reply("سجل أولًا باستخدام /تسجيل");
     return;
   }
   const userId = res.rows[0].id;
@@ -271,6 +300,23 @@ cron.schedule('0 0 * * *', async () => {
   }
 
   console.log("✅ تم توزيع الأكواد لهذا اليوم");
+});
+
+// ====== 👑 لوحة تحكم الأدمن ======
+bot.command('admin', async (ctx) => {
+  if (ctx.from.id !== ADMIN_ID) {
+    return ctx.reply("❌ هذا الأمر مخصص للأدمن فقط.");
+  }
+
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback("📴 إيقاف/تشغيل الأكواد", "toggle_codes")],
+    [Markup.button.callback("📅 تغيير عدد الأيام", "set_days")],
+    [Markup.button.callback("👁️ تغيير المشاهدات", "set_views")],
+    [Markup.button.callback("📢 إرسال إشعار جماعي", "broadcast")],
+    [Markup.button.callback("📊 عرض الإحصائيات", "stats")]
+  ]);
+
+  await ctx.reply("🔐 لوحة تحكم الأدمن:", keyboard);
 });
 
 // ====== تشغيل البوت ======
