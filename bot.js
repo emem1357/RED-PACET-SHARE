@@ -77,6 +77,22 @@ async function autoNameInGroup(groupId) {
   return `User${count}`;
 }
 
+// ====== ✅ لوحة الأزرار الرئيسية ======
+const mainKeyboard = Markup.keyboard([
+  ["/register", "/upload_codes"],
+  ["/today", "/mycodes"],
+  [{ text: "📱 إرسال رقم الهاتف", request_contact: true }],
+  ["/help"]
+]).resize();
+
+// ====== ✅ أمر /start ======
+bot.start((ctx) => {
+  ctx.reply(
+    "👋 أهلاً بك في البوت!\n\nاستخدم الأزرار بالأسفل أو الأوامر التالية:\n/register - للتسجيل\n/upload_codes - لرفع الأكواد\n/today - لعرض أكواد اليوم\n/mycodes - لعرض الأكواد الخاصة بك",
+    mainKeyboard
+  );
+});
+
 // ====== تسجيل جديد ======
 bot.command('register', async (ctx) => {
   const tgId = ctx.from.id;
@@ -163,7 +179,7 @@ bot.on('contact', async (ctx) => {
     [tgId, st.binance, phone, autoName, groupId]
   );
 
-  await ctx.reply(`✅ تم التسجيل بنجاح!\nالمجموعة: ${groupId}\nاسمك التلقائي: ${autoName}`);
+  await ctx.reply(`✅ تم التسجيل بنجاح!\nالمجموعة: ${groupId}\nاسمك التلقائي: ${autoName}`, mainKeyboard);
   delete userState[tgId];
 });
 
@@ -204,6 +220,24 @@ bot.command('today', async (ctx) => {
     const used = row.used ? '✅ مستخدم' : '🔲 غير مستخدم';
     await ctx.reply(`${row.code_text}\nالحالة: ${used}`);
   }
+});
+
+// ====== عرض الأكواد الخاصة بالمستخدم ======
+bot.command('mycodes', async (ctx) => {
+  const uid = ctx.from.id;
+  const res = await q('SELECT id FROM users WHERE telegram_id=$1', [uid]);
+  if (res.rowCount === 0) {
+    await ctx.reply("سجل أولًا باستخدام /register");
+    return;
+  }
+  const userId = res.rows[0].id;
+  const codes = await q('SELECT code_text FROM codes WHERE owner_id=$1', [userId]);
+  if (codes.rowCount === 0) {
+    await ctx.reply("❌ لا توجد لديك أكواد بعد.");
+    return;
+  }
+  const list = codes.rows.map((c, i) => `${i + 1}. ${c.code_text}`).join("\n");
+  await ctx.reply(`📋 أكوادك:\n${list}`);
 });
 
 // ====== توزيع الأكواد يومياً ======
