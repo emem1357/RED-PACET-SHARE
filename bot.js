@@ -373,7 +373,7 @@ bot.command("set_group", async (ctx) => {
 
 // ====== Webhook / Web Service setup ======
 const RENDER_URL = process.env.RENDER_URL || "";
-const secretPath = process.env.SECRET_PATH || "/bot-webhook";
+const secretPath = process.env.SECRET_PATH || "bot-webhook";
 
 if (RENDER_URL) {
   (async () => {
@@ -381,16 +381,24 @@ if (RENDER_URL) {
       const app = express();
       app.use(express.json());
 
-      const fullWebhookUrl = `${RENDER_URL.replace(/\/$/, "")}${secretPath}`;
-      await bot.telegram.setWebhook(fullWebhookUrl);
-      app.use(bot.webhookCallback(secretPath));
+      console.log("🔑 SECRET_PATH =", secretPath);
+      console.log("🌍 RENDER_URL  =", RENDER_URL);
 
-      app.get('/', (req, res) => res.send('✅ Bot server is running!'));
+      const fullWebhookUrl = `${RENDER_URL.replace(/\/$/, "")}/${secretPath}`;
+      console.log("📡 Full Webhook URL =", fullWebhookUrl);
+
+      await bot.telegram.setWebhook(fullWebhookUrl);
+
+      app.use(`/${secretPath}`, bot.webhookCallback(`/${secretPath}`));
+
+      app.get("/", (req, res) => res.send("✅ Bot server is running!"));
 
       const PORT = process.env.PORT || 3000;
-      app.listen(PORT, () => console.log(`🚀 Webhook running on ${PORT}, URL: ${fullWebhookUrl}`));
+      app.listen(PORT, () =>
+        console.log(`🚀 Webhook running on port ${PORT}, URL: ${fullWebhookUrl}`)
+      );
     } catch (err) {
-      console.error("Failed to start webhook:", err);
+      console.error("❌ Failed to start webhook:", err);
       process.exit(1);
     }
   })();
@@ -401,7 +409,7 @@ if (RENDER_URL) {
       bot.launch();
       console.log("🚀 Bot running with long polling...");
     } catch (err) {
-      console.error("Failed to start bot:", err);
+      console.error("❌ Failed to start bot:", err);
     }
   })();
 }
