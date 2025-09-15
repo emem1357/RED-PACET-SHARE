@@ -1,13 +1,16 @@
-// bot.js (integrated with full admin_settings fields)
+// bot.js
+// Telegram Bot with full admin_settings integration
 // Requires: telegraf, pg, dotenv, node-cron, express
-import { Telegraf, Markup } from 'telegraf';
-import pkg from 'pg';
-import dotenv from 'dotenv';
-import cron from 'node-cron';
-import express from 'express';
+
+import { Telegraf, Markup } from "telegraf";
+import pkg from "pg";
+import dotenv from "dotenv";
+import cron from "node-cron";
+import express from "express";
 
 dotenv.config();
 
+// ====== Init Bot & DB ======
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const { Pool } = pkg;
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
@@ -40,7 +43,7 @@ async function updateSettings(field, value) {
 
 // ====== state ======
 const userState = {};
-let lastRunDate = null; // to prevent duplicate runs
+let lastRunDate = null; // to prevent duplicate scheduler runs
 let adminBroadcastMode = false;
 
 // ====== helpers: group assign & auto-name ======
@@ -61,34 +64,39 @@ const mainKeyboard = Markup.keyboard([
   ["/تسجيل", "/رفع_اكواد"],
   ["/اكواد_اليوم", "/اكوادى"],
   [{ text: "📱 إرسال رقم الهاتف", request_contact: true }],
-  ["/مساعدة"]
+  ["/مساعدة"],
 ]).resize();
 
 // ====== /start ======
 bot.start((ctx) => {
   ctx.reply(
-    "👋 أهلاً بك في البوت!\n\nاستخدم الأزرار بالأسفل أو الأوامر التالية:\n/تسجيل - للتسجيل\n/رفع_اكواد - لرفع الأكواد\n/اكواد_اليوم - لعرض أكواد اليوم\n/اكوادى - لعرض أكوادك",
+    "👋 أهلاً بك في البوت!\n\n" +
+      "استخدم الأزرار بالأسفل أو الأوامر التالية:\n" +
+      "/تسجيل - للتسجيل\n" +
+      "/رفع_اكواد - لرفع الأكواد\n" +
+      "/اكواد_اليوم - لعرض أكواد اليوم\n" +
+      "/اكوادى - لعرض أكوادك",
     mainKeyboard
   );
 });
 
 // ====== registration ======
-bot.command('تسجيل', async (ctx) => {
+bot.command("تسجيل", async (ctx) => {
   const tgId = ctx.from.id;
   const exists = await q(`SELECT id FROM users WHERE telegram_id=$1`, [tgId]);
   if (exists.rowCount > 0) {
     await ctx.reply("أنت مسجل بالفعل ✅");
     return;
   }
-  userState[tgId] = { stage: 'awaiting_binance' };
+  userState[tgId] = { stage: "awaiting_binance" };
   await ctx.reply("أدخل معرف بينانس الخاص بك:");
 });
 
 // ====== text handler ======
-bot.on('text', async (ctx) => {
+bot.on("text", async (ctx) => {
   const uid = ctx.from.id;
 
-  // Admin broadcast
+  // Admin broadcast mode
   if (uid === ADMIN_ID && adminBroadcastMode) {
     adminBroadcastMode = false;
     const message = ctx.message.text;
@@ -96,7 +104,10 @@ bot.on('text', async (ctx) => {
     let success = 0;
     for (const row of users.rows) {
       try {
-        await bot.telegram.sendMessage(row.telegram_id, `📢 رسالة من الأدمن:\n\n${message}`);
+        await bot.telegram.sendMessage(
+          row.telegram_id,
+          `📢 رسالة من الأدمن:\n\n${message}`
+        );
         success++;
       } catch (err) {
         console.error(`❌ Failed to send to ${row.telegram_id}:`, err.message);
@@ -106,64 +117,76 @@ bot.on('text', async (ctx) => {
     return;
   }
 
-  // User flow
+  // User registration / upload flow
   const st = userState[uid];
   if (!st) return;
 
-  if (st.stage === 'awaiting_binance') {
+  if (st.stage === "awaiting_binance") {
     st.binance = ctx.message.text.trim();
-    st.stage = 'awaiting_phone';
+    st.stage = "awaiting_phone";
     await ctx.reply("أرسل رقم هاتفك عبر زر المشاركة:", {
       reply_markup: {
         keyboard: [[{ text: "📱 إرسال رقم الهاتف", request_contact: true }]],
         one_time_keyboard: true,
-        resize_keyboard: true
-      }
+        resize_keyboard: true,
+      },
     });
     return;
   }
 
-  if (st.stage === 'uploading_codes') {
-    if (ctx.message.text.trim() === '/done' || ctx.message.text.trim() === '/انتهيت') {
+  if (st.stage === "uploading_codes") {
+    if (
+      ctx.message.text.trim() === "/done" ||
+      ctx.message.text.trim() === "/انتهيت"
+    ) {
       const codes = st.codes || [];
       if (codes.length === 0) {
         await ctx.reply("لم يتم استلام أي كود.");
         delete userState[uid];
         return;
       }
-      const userrow = await q('SELECT id FROM users WHERE telegram_id=$1', [uid]);
+      const userrow = await q("SELECT id FROM users WHERE telegram_id=$1", [
+        uid,
+      ]);
       const owner_id = userrow.rows[0].id;
       const settings = await getSettings();
       for (const c of codes) {
         await q(
-          'INSERT INTO codes (owner_id, code_text, days_count, views_per_day) VALUES ($1,$2,$3,$4)',
-          [owner_id, c, settings.distribution_days, settings.daily_codes_limit]
+          "INSERT INTO codes (owner_id, code_text, days_count, views_per_day) VALUES ($1,$2,$3,$4)",
+          [
+            owner_id,
+            c,
+            settings.distribution_days,
+            settings.daily_codes_limit,
+          ]
         );
       }
       await ctx.reply(`تم حفظ ${codes.length} أكواد ✅`);
       delete userState[uid];
     } else {
       st.codes.push(ctx.message.text.trim());
-      await ctx.reply(`استلمت الكود رقم ${st.codes.length}. اكتب /done عند الانتهاء.`);
+      await ctx.reply(
+        `استلمت الكود رقم ${st.codes.length}. اكتب /done عند الانتهاء.`
+      );
     }
     return;
   }
 });
 
 // ====== contact handler ======
-bot.on('contact', async (ctx) => {
+bot.on("contact", async (ctx) => {
   const contact = ctx.message.contact;
   const tgId = ctx.from.id;
   const st = userState[tgId];
-  if (!st || st.stage !== 'awaiting_phone') {
+  if (!st || st.stage !== "awaiting_phone") {
     await ctx.reply("ابدأ التسجيل بكتابة /تسجيل");
     return;
   }
 
   const phone = contact.phone_number;
-  const dupPhone = await q('SELECT id FROM users WHERE phone=$1', [phone]);
+  const dupPhone = await q("SELECT id FROM users WHERE phone=$1", [phone]);
   if (dupPhone.rowCount > 0) {
-    await ctx.reply('⚠️ هذا الرقم مستخدم بالفعل.');
+    await ctx.reply("⚠️ هذا الرقم مستخدم بالفعل.");
     delete userState[tgId];
     return;
   }
@@ -178,26 +201,29 @@ bot.on('contact', async (ctx) => {
     [tgId, st.binance, phone, autoName, groupId]
   );
 
-  await ctx.reply(`✅ تم التسجيل بنجاح!\nالمجموعة: ${groupId}\nاسمك التلقائي: ${autoName}`, mainKeyboard);
+  await ctx.reply(
+    `✅ تم التسجيل بنجاح!\nالمجموعة: ${groupId}\nاسمك التلقائي: ${autoName}`,
+    mainKeyboard
+  );
   delete userState[tgId];
 });
 
 // ====== upload codes ======
-bot.command('رفع_اكواد', async (ctx) => {
+bot.command("رفع_اكواد", async (ctx) => {
   const uid = ctx.from.id;
-  const res = await q('SELECT id FROM users WHERE telegram_id=$1', [uid]);
+  const res = await q("SELECT id FROM users WHERE telegram_id=$1", [uid]);
   if (res.rowCount === 0) {
     await ctx.reply("سجل أولًا باستخدام /تسجيل");
     return;
   }
-  userState[uid] = { stage: 'uploading_codes', codes: [] };
+  userState[uid] = { stage: "uploading_codes", codes: [] };
   await ctx.reply("ارسل الأكواد واحدًا في كل رسالة.\nاكتب /done عند الانتهاء.");
 });
 
 // ====== today codes ======
-bot.command('اكواد_اليوم', async (ctx) => {
+bot.command("اكواد_اليوم", async (ctx) => {
   const uid = ctx.from.id;
-  const u = await q('SELECT id FROM users WHERE telegram_id=$1', [uid]);
+  const u = await q("SELECT id FROM users WHERE telegram_id=$1", [uid]);
   if (u.rowCount === 0) {
     await ctx.reply("سجل أولًا باستخدام /تسجيل");
     return;
@@ -216,21 +242,23 @@ bot.command('اكواد_اليوم', async (ctx) => {
     return;
   }
   for (const row of res.rows) {
-    const used = row.used ? '✅ مستخدم' : '🔲 غير مستخدم';
+    const used = row.used ? "✅ مستخدم" : "🔲 غير مستخدم";
     await ctx.reply(`${row.code_text}\nالحالة: ${used}`);
   }
 });
 
 // ====== my codes ======
-bot.command('اكوادى', async (ctx) => {
+bot.command("اكوادى", async (ctx) => {
   const uid = ctx.from.id;
-  const res = await q('SELECT id FROM users WHERE telegram_id=$1', [uid]);
+  const res = await q("SELECT id FROM users WHERE telegram_id=$1", [uid]);
   if (res.rowCount === 0) {
     await ctx.reply("سجل أولًا باستخدام /تسجيل");
     return;
   }
   const userId = res.rows[0].id;
-  const codes = await q('SELECT code_text FROM codes WHERE owner_id=$1', [userId]);
+  const codes = await q("SELECT code_text FROM codes WHERE owner_id=$1", [
+    userId,
+  ]);
   if (codes.rowCount === 0) {
     await ctx.reply("❌ لا توجد لديك أكواد.");
     return;
@@ -244,16 +272,18 @@ async function runDailyDistribution() {
   console.log("📌 Starting daily distribution...");
   const settings = await getSettings();
   const usersRes = await q(`SELECT id FROM users`);
-  const codesRes = await q(`SELECT id, owner_id, days_count, views_per_day FROM codes WHERE days_count > 0`);
+  const codesRes = await q(
+    `SELECT id, owner_id, days_count, views_per_day FROM codes WHERE days_count > 0`
+  );
 
-  const users = usersRes.rows.map(r => r.id);
+  const users = usersRes.rows.map((r) => r.id);
   const codes = codesRes.rows;
   const today = new Date().toISOString().slice(0, 10);
 
   for (const c of codes) {
     if (c.days_count <= 0) continue;
 
-    const availableUsers = users.filter(uid => uid !== c.owner_id);
+    const availableUsers = users.filter((uid) => uid !== c.owner_id);
     if (availableUsers.length === 0) continue;
 
     const shuffled = availableUsers.sort(() => 0.5 - Math.random());
@@ -274,14 +304,14 @@ async function runDailyDistribution() {
 }
 
 // ====== scheduler ======
-cron.schedule('* * * * *', async () => {
+cron.schedule("* * * * *", async () => {
   try {
     const s = await getSettings();
     if (!s.is_scheduler_active) return;
     const now = new Date();
     const hour = now.getHours();
     const minute = now.getMinutes();
-    const ymdhm = `${now.getFullYear()}-${now.getMonth()+1}-${now.getDate()} ${hour}:${minute}`;
+    const ymdhm = `${now.getFullYear()}-${now.getMonth() + 1}-${now.getDate()} ${hour}:${minute}`;
     const sendHour = parseInt(s.send_time.split(":")[0], 10);
     if (hour === sendHour && minute === 0 && lastRunDate !== ymdhm) {
       lastRunDate = ymdhm;
@@ -293,7 +323,7 @@ cron.schedule('* * * * *', async () => {
 });
 
 // ====== Admin panel ======
-bot.command('admin', async (ctx) => {
+bot.command("admin", async (ctx) => {
   if (ctx.from.id !== ADMIN_ID) return ctx.reply("❌ مخصص للأدمن فقط.");
 
   const keyboard = Markup.inlineKeyboard([
@@ -303,21 +333,23 @@ bot.command('admin', async (ctx) => {
     [Markup.button.callback("📅 Set Days", "set_days")],
     [Markup.button.callback("👥 Set Group Size", "set_group")],
     [Markup.button.callback("📢 Broadcast", "broadcast")],
-    [Markup.button.callback("📊 Stats", "stats")]
+    [Markup.button.callback("📊 Stats", "stats")],
   ]);
 
   await ctx.reply("🔐 Admin Panel:", keyboard);
 });
 
 // ====== callback handler ======
-bot.on('callback_query', async (ctx) => {
+bot.on("callback_query", async (ctx) => {
   if (ctx.from.id !== ADMIN_ID) return ctx.answerCbQuery("❌ Not allowed");
   const action = ctx.callbackQuery.data;
 
   if (action === "toggle_scheduler") {
     const s = await getSettings();
     await updateSettings("is_scheduler_active", !s.is_scheduler_active);
-    await ctx.reply(`✅ Scheduler: ${!s.is_scheduler_active ? "Enabled" : "Disabled"}`);
+    await ctx.reply(
+      `✅ Scheduler: ${!s.is_scheduler_active ? "Enabled" : "Disabled"}`
+    );
   } else if (action === "set_time") {
     await ctx.reply("⏰ Send: /set_time 09:00");
   } else if (action === "set_limit") {
@@ -333,7 +365,15 @@ bot.on('callback_query', async (ctx) => {
     const u = await q(`SELECT COUNT(*) FROM users`);
     const c = await q(`SELECT COUNT(*) FROM codes`);
     const s = await getSettings();
-    await ctx.reply(`📊 Users: ${u.rows[0].count}\nCodes: ${c.rows[0].count}\nScheduler: ${s.is_scheduler_active ? "On" : "Off"}\nLimit: ${s.daily_codes_limit}\nDays: ${s.distribution_days}\nGroup: ${s.group_size}\nTime: ${s.send_time}`);
+    await ctx.reply(
+      `📊 Users: ${u.rows[0].count}\n` +
+        `Codes: ${c.rows[0].count}\n` +
+        `Scheduler: ${s.is_scheduler_active ? "On" : "Off"}\n` +
+        `Limit: ${s.daily_codes_limit}\n` +
+        `Days: ${s.distribution_days}\n` +
+        `Group: ${s.group_size}\n` +
+        `Time: ${s.send_time}`
+    );
   }
   await ctx.answerCbQuery();
 });
@@ -342,7 +382,8 @@ bot.on('callback_query', async (ctx) => {
 bot.command("set_time", async (ctx) => {
   if (ctx.from.id !== ADMIN_ID) return;
   const time = ctx.message.text.split(" ")[1];
-  if (!/^\d{2}:\d{2}$/.test(time)) return ctx.reply("❌ Invalid format. Example: /set_time 09:00");
+  if (!/^\d{2}:\d{2}$/.test(time))
+    return ctx.reply("❌ Invalid format. Example: /set_time 09:00");
   await updateSettings("send_time", time);
   await ctx.reply(`✅ Send time set to ${time}`);
 });
@@ -395,7 +436,9 @@ if (RENDER_URL) {
 
       const PORT = process.env.PORT || 3000;
       app.listen(PORT, () =>
-        console.log(`🚀 Webhook running on port ${PORT}, URL: ${fullWebhookUrl}`)
+        console.log(
+          `🚀 Webhook running on port ${PORT}, URL: ${fullWebhookUrl}`
+        )
       );
     } catch (err) {
       console.error("❌ Failed to start webhook:", err);
