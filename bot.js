@@ -43,7 +43,7 @@ async function updateSettings(field, value) {
 
 // ====== state ======
 const userState = {};
-let lastRunDate = null; // to prevent duplicate scheduler runs
+let lastRunDate = null;
 let adminBroadcastMode = false;
 
 // ====== helpers: group assign & auto-name ======
@@ -117,7 +117,6 @@ bot.on("text", async (ctx) => {
     return;
   }
 
-  // User registration / upload flow
   const st = userState[uid];
   if (!st) return;
 
@@ -145,20 +144,13 @@ bot.on("text", async (ctx) => {
         delete userState[uid];
         return;
       }
-      const userrow = await q("SELECT id FROM users WHERE telegram_id=$1", [
-        uid,
-      ]);
+      const userrow = await q("SELECT id FROM users WHERE telegram_id=$1", [uid]);
       const owner_id = userrow.rows[0].id;
       const settings = await getSettings();
       for (const c of codes) {
         await q(
           "INSERT INTO codes (owner_id, code_text, days_count, views_per_day) VALUES ($1,$2,$3,$4)",
-          [
-            owner_id,
-            c,
-            settings.distribution_days,
-            settings.daily_codes_limit,
-          ]
+          [owner_id, c, settings.distribution_days, settings.daily_codes_limit]
         );
       }
       await ctx.reply(`تم حفظ ${codes.length} أكواد ✅`);
@@ -256,9 +248,7 @@ bot.command("اكوادى", async (ctx) => {
     return;
   }
   const userId = res.rows[0].id;
-  const codes = await q("SELECT code_text FROM codes WHERE owner_id=$1", [
-    userId,
-  ]);
+  const codes = await q("SELECT code_text FROM codes WHERE owner_id=$1", [userId]);
   if (codes.rowCount === 0) {
     await ctx.reply("❌ لا توجد لديك أكواد.");
     return;
@@ -428,10 +418,13 @@ if (RENDER_URL) {
       const fullWebhookUrl = `${RENDER_URL.replace(/\/$/, "")}/${secretPath}`;
       console.log("📡 Full Webhook URL =", fullWebhookUrl);
 
+      // ضبط الـ Webhook على Telegram
       await bot.telegram.setWebhook(fullWebhookUrl);
 
-      app.use(`/${secretPath}`, bot.webhookCallback(`/${secretPath}`));
+      // ربط Express بالبوت بدون إعادة تمرير path
+      app.use(`/${secretPath}`, bot.webhookCallback());
 
+      // صفحة اختبار
       app.get("/", (req, res) => res.send("✅ Bot server is running!"));
 
       const PORT = process.env.PORT || 3000;
@@ -456,3 +449,4 @@ if (RENDER_URL) {
     }
   })();
 }
+
