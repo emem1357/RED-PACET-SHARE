@@ -147,17 +147,21 @@ bot.on("text", async (ctx) => {
       const userrow = await q("SELECT id FROM users WHERE telegram_id=$1", [
         uid,
       ]);
+      if (userrow.rowCount === 0) {
+        await ctx.reply("⚠️ خطأ: لم يتم العثور على المستخدم في قاعدة البيانات.");
+        delete userState[uid];
+        return;
+      }
       const owner_id = userrow.rows[0].id;
       const settings = await getSettings();
+      // Ensure settings exist fallback
+      const viewsPerDay = settings ? settings.daily_codes_limit : 50;
+
       for (const c of codes) {
+        // store each code as valid for one day only (days_count = 1)
         await q(
-          "INSERT INTO codes (owner_id, code_text, days_count, views_per_day) VALUES ($1,$2,$3,$4)",
-          [
-            owner_id,
-            c,
-            settings.distribution_days,
-            settings.daily_codes_limit,
-          ]
+          "INSERT INTO codes (owner_id, code_text, days_count, views_per_day, status) VALUES ($1,$2,$3,$4,$5)",
+          [owner_id, c, 1, viewsPerDay, "active"]
         );
       }
       await ctx.reply(`تم حفظ ${codes.length} أكواد ✅`);
@@ -195,8 +199,8 @@ bot.on("contact", async (ctx) => {
   const autoName = await autoNameInGroup(groupId);
 
   await q(
-    `INSERT INTO users (telegram_id, binance_id, phone, auto_name, group_id, verified) 
-     VALUES ($1,$2,$3,$4,$5,true)`,
+    `INSERT INTO users (telegram_id, binance_id, phone, auto_name, group_id, verified, created_at) 
+     VALUES ($1,$2,$3,$4,$5,true, NOW())`,
     [tgId, st.binance, phone, autoName, groupId]
   );
 
@@ -272,7 +276,7 @@ async function runDailyDistribution() {
   const settings = await getSettings();
   const usersRes = await q(`SELECT id FROM users`);
   const codesRes = await q(
-    `SELECT id, owner_id, days_count, views_per_day FROM codes WHERE days_count > 0`
+    `SELECT id, owner_id, days_count, views_per_day FROM codes WHERE days_count > 0 AND status = 'active'`
   );
 
   const users = usersRes.rows.map((r) => r.id);
@@ -285,19 +289,49 @@ async function runDailyDistribution() {
     const availableUsers = users.filter((uid) => uid !== c.owner_id);
     if (availableUsers.length === 0) continue;
 
+    let count = 0;
+    // shuffle availableUsers (simple sort shuffle)
     const shuffled = availableUsers.sort(() => 0.5 - Math.random());
-    const selected = shuffled.slice(0, c.views_per_day);
 
-    for (const uid of selected) {
+    for (const uid of shuffled) {
+      if (count >= c.views_per_day) break;
+
+      // تمنع أن يرى نفس المستخدم أي كود من نفس المالك طوال الدورة
+      const seenBefore = await q(
+        `SELECT 1 FROM code_view_assignments a
+         JOIN codes cc ON a.code_id = cc.id
+         WHERE a.assigned_to_user_id=$1 AND cc.owner_id=$2 LIMIT 1`,
+        [uid, c.owner_id]
+      );
+      if (seenBefore.rowCount > 0) continue;
+
+      // كذلك نتأكد أن نفس المستخدم لم يُعطَ نفس الكود لنفس اليوم مسبقاً
+      const alreadyAssignedToday = await q(
+        `SELECT 1 FROM code_view_assignments 
+         WHERE code_id=$1 AND assigned_to_user_id=$2 AND assigned_date=$3 LIMIT 1`,
+        [c.id, uid, today]
+      );
+      if (alreadyAssignedToday.rowCount > 0) continue;
+
       try {
         await q(
-          `INSERT INTO code_view_assignments (code_id, assigned_to_user_id, assigned_date) 
-           VALUES ($1,$2,$3)`,
+          `INSERT INTO code_view_assignments (code_id, assigned_to_user_id, assigned_date, presented_at, used, verified) 
+           VALUES ($1,$2,$3, NOW(), false, false)`,
           [c.id, uid, today]
         );
-      } catch {}
+        count++;
+      } catch (err) {
+        console.error("❌ Failed to insert assignment:", err.message);
+        // continue trying other users
+      }
     }
-    await q(`UPDATE codes SET days_count = days_count - 1 WHERE id=$1`, [c.id]);
+
+    // mark code as distributed (days_count -> 0)
+    try {
+      await q(`UPDATE codes SET days_count = 0 WHERE id=$1`, [c.id]);
+    } catch (err) {
+      console.error("❌ Failed to update code days_count:", err.message);
+    }
   }
   console.log("✅ Distribution complete");
 }
@@ -318,7 +352,7 @@ cron.schedule("0 0 1 * *", async () => {
 cron.schedule("* * * * *", async () => {
   try {
     const s = await getSettings();
-    if (!s.is_scheduler_active) return;
+    if (!s || !s.is_scheduler_active) return;
     const now = new Date();
     const hour = now.getHours();
     const minute = now.getMinutes();
@@ -432,7 +466,14 @@ bot.hears(/^\/set_group/, async (ctx) => {
   if (ctx.from.id !== ADMIN_ID) return;
   const val = parseInt(ctx.message.text.split(" ")[1], 10);
   if (isNaN(val)) return ctx.reply("❌ Invalid number");
+  // update admin_settings
   await updateSettings("group_size", val);
+  // also update existing groups.max_users so DB reflects the change
+  try {
+    await q("UPDATE groups SET max_users = $1", [val]);
+  } catch (err) {
+    console.error("❌ Failed to update groups.max_users:", err.message);
+  }
   await ctx.reply(`✅ Group size set to ${val}`);
 });
 
@@ -452,9 +493,11 @@ if (RENDER_URL) {
       const fullWebhookUrl = `${RENDER_URL.replace(/\/$/, "")}/${secretPath}`;
       console.log("📡 Full Webhook URL =", fullWebhookUrl);
 
+      // Set webhook on Telegram
       await bot.telegram.setWebhook(fullWebhookUrl);
 
-      app.use(`/${secretPath}`, bot.webhookCallback(`/${secretPath}`));
+      // Mount Telegraf webhook callback correctly (no path passed)
+      app.use(`/${secretPath}`, bot.webhookCallback());
 
       app.get("/", (req, res) => res.send("✅ Bot server is running!"));
 
