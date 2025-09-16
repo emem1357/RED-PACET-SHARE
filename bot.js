@@ -43,7 +43,7 @@ async function updateSettings(field, value) {
 
 // ====== state ======
 const userState = {};
-let lastRunDate = null;
+let lastRunDate = null; // to prevent duplicate scheduler runs
 let adminBroadcastMode = false;
 
 // ====== helpers: group assign & auto-name ======
@@ -64,7 +64,6 @@ const mainKeyboard = Markup.keyboard([
   ["/تسجيل", "/رفع_اكواد"],
   ["/اكواد_اليوم", "/اكوادى"],
   [{ text: "📱 إرسال رقم الهاتف", request_contact: true }],
-  ["/مساعدة"],
 ]).resize();
 
 // ====== /start ======
@@ -81,7 +80,7 @@ bot.start((ctx) => {
 });
 
 // ====== registration ======
-bot.command("تسجيل", async (ctx) => {
+bot.hears(/^\/تسجيل/, async (ctx) => {
   const tgId = ctx.from.id;
   const exists = await q(`SELECT id FROM users WHERE telegram_id=$1`, [tgId]);
   if (exists.rowCount > 0) {
@@ -117,6 +116,7 @@ bot.on("text", async (ctx) => {
     return;
   }
 
+  // User registration / upload flow
   const st = userState[uid];
   if (!st) return;
 
@@ -144,13 +144,20 @@ bot.on("text", async (ctx) => {
         delete userState[uid];
         return;
       }
-      const userrow = await q("SELECT id FROM users WHERE telegram_id=$1", [uid]);
+      const userrow = await q("SELECT id FROM users WHERE telegram_id=$1", [
+        uid,
+      ]);
       const owner_id = userrow.rows[0].id;
       const settings = await getSettings();
       for (const c of codes) {
         await q(
           "INSERT INTO codes (owner_id, code_text, days_count, views_per_day) VALUES ($1,$2,$3,$4)",
-          [owner_id, c, settings.distribution_days, settings.daily_codes_limit]
+          [
+            owner_id,
+            c,
+            settings.distribution_days,
+            settings.daily_codes_limit,
+          ]
         );
       }
       await ctx.reply(`تم حفظ ${codes.length} أكواد ✅`);
@@ -201,7 +208,7 @@ bot.on("contact", async (ctx) => {
 });
 
 // ====== upload codes ======
-bot.command("رفع_اكواد", async (ctx) => {
+bot.hears(/^\/رفع_اكواد/, async (ctx) => {
   const uid = ctx.from.id;
   const res = await q("SELECT id FROM users WHERE telegram_id=$1", [uid]);
   if (res.rowCount === 0) {
@@ -213,7 +220,7 @@ bot.command("رفع_اكواد", async (ctx) => {
 });
 
 // ====== today codes ======
-bot.command("اكواد_اليوم", async (ctx) => {
+bot.hears(/^\/اكواد_اليوم/, async (ctx) => {
   const uid = ctx.from.id;
   const u = await q("SELECT id FROM users WHERE telegram_id=$1", [uid]);
   if (u.rowCount === 0) {
@@ -240,7 +247,7 @@ bot.command("اكواد_اليوم", async (ctx) => {
 });
 
 // ====== my codes ======
-bot.command("اكوادى", async (ctx) => {
+bot.hears(/^\/اكوادى/, async (ctx) => {
   const uid = ctx.from.id;
   const res = await q("SELECT id FROM users WHERE telegram_id=$1", [uid]);
   if (res.rowCount === 0) {
@@ -248,7 +255,9 @@ bot.command("اكوادى", async (ctx) => {
     return;
   }
   const userId = res.rows[0].id;
-  const codes = await q("SELECT code_text FROM codes WHERE owner_id=$1", [userId]);
+  const codes = await q("SELECT code_text FROM codes WHERE owner_id=$1", [
+    userId,
+  ]);
   if (codes.rowCount === 0) {
     await ctx.reply("❌ لا توجد لديك أكواد.");
     return;
@@ -293,6 +302,18 @@ async function runDailyDistribution() {
   console.log("✅ Distribution complete");
 }
 
+// ====== monthly reset cycle ======
+cron.schedule("0 0 1 * *", async () => {
+  try {
+    console.log("🔄 بدء دورة جديدة - مسح الأكواد والتوزيعات...");
+    await q("DELETE FROM code_view_assignments");
+    await q("DELETE FROM codes");
+    console.log("✅ تم مسح الأكواد والتوزيعات. دورة جديدة بدأت!");
+  } catch (err) {
+    console.error("❌ خطأ أثناء بدء دورة جديدة:", err);
+  }
+});
+
 // ====== scheduler ======
 cron.schedule("* * * * *", async () => {
   try {
@@ -313,7 +334,7 @@ cron.schedule("* * * * *", async () => {
 });
 
 // ====== Admin panel ======
-bot.command("admin", async (ctx) => {
+bot.hears(/^\/admin/, async (ctx) => {
   if (ctx.from.id !== ADMIN_ID) return ctx.reply("❌ مخصص للأدمن فقط.");
 
   const keyboard = Markup.inlineKeyboard([
@@ -327,6 +348,19 @@ bot.command("admin", async (ctx) => {
   ]);
 
   await ctx.reply("🔐 Admin Panel:", keyboard);
+});
+
+// ====== reset cycle command for admin ======
+bot.hears(/^\/reset_cycle/, async (ctx) => {
+  if (ctx.from.id !== ADMIN_ID) return ctx.reply("❌ مخصص للأدمن فقط.");
+  try {
+    await q("DELETE FROM code_view_assignments");
+    await q("DELETE FROM codes");
+    await ctx.reply("🔄 تم بدء دورة جديدة ومسح الأكواد والتوزيعات بنجاح!");
+  } catch (err) {
+    console.error(err);
+    await ctx.reply("❌ حدث خطأ أثناء بدء الدورة الجديدة.");
+  }
 });
 
 // ====== callback handler ======
@@ -369,7 +403,7 @@ bot.on("callback_query", async (ctx) => {
 });
 
 // ====== Admin text commands ======
-bot.command("set_time", async (ctx) => {
+bot.hears(/^\/set_time/, async (ctx) => {
   if (ctx.from.id !== ADMIN_ID) return;
   const time = ctx.message.text.split(" ")[1];
   if (!/^\d{2}:\d{2}$/.test(time))
@@ -378,7 +412,7 @@ bot.command("set_time", async (ctx) => {
   await ctx.reply(`✅ Send time set to ${time}`);
 });
 
-bot.command("set_limit", async (ctx) => {
+bot.hears(/^\/set_limit/, async (ctx) => {
   if (ctx.from.id !== ADMIN_ID) return;
   const val = parseInt(ctx.message.text.split(" ")[1], 10);
   if (isNaN(val)) return ctx.reply("❌ Invalid number");
@@ -386,7 +420,7 @@ bot.command("set_limit", async (ctx) => {
   await ctx.reply(`✅ Daily limit set to ${val}`);
 });
 
-bot.command("set_days", async (ctx) => {
+bot.hears(/^\/set_days/, async (ctx) => {
   if (ctx.from.id !== ADMIN_ID) return;
   const val = parseInt(ctx.message.text.split(" ")[1], 10);
   if (isNaN(val)) return ctx.reply("❌ Invalid number");
@@ -394,7 +428,7 @@ bot.command("set_days", async (ctx) => {
   await ctx.reply(`✅ Distribution days set to ${val}`);
 });
 
-bot.command("set_group", async (ctx) => {
+bot.hears(/^\/set_group/, async (ctx) => {
   if (ctx.from.id !== ADMIN_ID) return;
   const val = parseInt(ctx.message.text.split(" ")[1], 10);
   if (isNaN(val)) return ctx.reply("❌ Invalid number");
@@ -418,13 +452,10 @@ if (RENDER_URL) {
       const fullWebhookUrl = `${RENDER_URL.replace(/\/$/, "")}/${secretPath}`;
       console.log("📡 Full Webhook URL =", fullWebhookUrl);
 
-      // ضبط الـ Webhook على Telegram
       await bot.telegram.setWebhook(fullWebhookUrl);
 
-      // ربط Express بالبوت بدون إعادة تمرير path
-      app.use(`/${secretPath}`, bot.webhookCallback());
+      app.use(`/${secretPath}`, bot.webhookCallback(`/${secretPath}`));
 
-      // صفحة اختبار
       app.get("/", (req, res) => res.send("✅ Bot server is running!"));
 
       const PORT = process.env.PORT || 3000;
@@ -449,4 +480,3 @@ if (RENDER_URL) {
     }
   })();
 }
-
