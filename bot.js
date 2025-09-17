@@ -13,10 +13,10 @@ dotenv.config();
 // ====== Init Bot & DB ======
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const { Pool } = pkg;
-const pool = new Pool({ 
+const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: {
-    rejectUnauthorized: false  // يسمح بالاتصال حتى لو كانت الشهادة self-signed
+    rejectUnauthorized: true
   }
 });
 
