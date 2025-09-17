@@ -544,7 +544,7 @@ cron.schedule("* * * * *", async () => {
 });
 
 // ====== Admin panel ======
-bot.command("admin", async (ctx) => { ... });
+bot.command("admin", async (ctx) => {
   if (ctx.from.id.toString() !== ADMIN_ID.toString()) return ctx.reply("❌ مخصص للأدمن فقط.");
 
   const keyboard = Markup.inlineKeyboard([
