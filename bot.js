@@ -36,8 +36,9 @@ async function ensureAdminSettings() {
   try {
     await q(
       `INSERT INTO admin_settings (id, daily_codes_limit, distribution_days, group_size, send_time, is_scheduler_active)
-       VALUES (1, 50, 20, 1000, '09:00:00', false)
-       ON CONFLICT (id) DO NOTHING`
+       VALUES (1, 50, 20, 1000, '09:00:00', $1)
+       ON CONFLICT (id) DO NOTHING`,
+      [false]
     );
   } catch (err) {
     // ignore
