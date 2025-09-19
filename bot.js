@@ -23,7 +23,7 @@ const pool = new Pool({
 });
 
 // ====== Admin ID (owner) ======
-const ADMIN_ID = 6305481147;
+const ADMIN_ID = process.env.ADMIN_ID;
 
 // ====== simple DB query wrapper ======
 async function q(sql, params) {
@@ -138,7 +138,7 @@ const mainKeyboard = (userId) => {
     ["/اكواد_اليوم", "/اكوادى"],
     [{ text: "📱 إرسال رقم الهاتف", request_contact: true }],
   ];
-  if (userId.toString() === ADMIN_ID.toString()) {
+  if (userId.toString() === ADMIN_ID?.toString()) {
     base.push(["/admin"]);
   }
   return Markup.keyboard(base).resize();
@@ -179,7 +179,7 @@ bot.on("text", async (ctx) => {
   const uid = ctx.from.id.toString();
 
   // Broadcast mode
-  if (uid.toString() === ADMIN_ID.toString() && adminBroadcastMode) {
+  if (uid.toString() === ADMIN_ID?.toString() && adminBroadcastMode) {
     adminBroadcastMode = false;
     const message = ctx.message.text;
     try {
@@ -558,7 +558,9 @@ cron.schedule("* * * * *", async () => {
 
 // ====== Admin panel ======
 bot.command("admin", async (ctx) => {
-  if (ctx.from.id.toString() !== ADMIN_ID.toString()) return ctx.reply("❌ مخصص للأدمن فقط.");
+  if (ctx.from.id.toString() !== ADMIN_ID?.toString()) {
+    return ctx.reply("❌ مخصص للأدمن فقط.");
+  }
 
   const keyboard = Markup.inlineKeyboard([
     [Markup.button.callback("📴 Toggle Scheduler", "toggle_scheduler")],
@@ -575,7 +577,9 @@ bot.command("admin", async (ctx) => {
 
 // ====== reset cycle for admin ======
 bot.hears(/^\/reset_cycle/, async (ctx) => {
-  if (ctx.from.id.toString() !== ADMIN_ID.toString()) return ctx.reply("❌ مخصص للأدمن فقط.");
+  if (ctx.from.id.toString() !== ADMIN_ID?.toString()) {
+    return ctx.reply("❌ مخصص للأدمن فقط.");
+  }
   try {
     await q("DELETE FROM code_view_assignments");
     await q("DELETE FROM codes");
@@ -588,7 +592,9 @@ bot.hears(/^\/reset_cycle/, async (ctx) => {
 
 // ====== callback handler ======
 bot.on("callback_query", async (ctx) => {
-  if (ctx.from.id.toString() !== ADMIN_ID.toString()) return ctx.answerCbQuery("❌ Not allowed");
+  if (ctx.from.id.toString() !== ADMIN_ID?.toString()) {
+    return ctx.answerCbQuery("❌ Not allowed");
+  }
   const action = ctx.callbackQuery.data;
 
   if (action === "toggle_scheduler") {
@@ -625,7 +631,9 @@ bot.on("callback_query", async (ctx) => {
 
 // ====== Admin text commands ======
 bot.hears(/^\/set_time/, async (ctx) => {
-  if (ctx.from.id.toString() !== ADMIN_ID.toString()) return;
+  if (ctx.from.id.toString() !== ADMIN_ID?.toString()) {
+    return;
+  }
   const time = ctx.message.text.split(" ")[1];
   if (!/^\d{2}:\d{2}$/.test(time)) return ctx.reply("❌ Invalid format. Example: /set_time 09:00");
   await updateSettings("send_time", time);
@@ -633,7 +641,9 @@ bot.hears(/^\/set_time/, async (ctx) => {
 });
 
 bot.hears(/^\/set_limit/, async (ctx) => {
-  if (ctx.from.id.toString() !== ADMIN_ID.toString()) return;
+  if (ctx.from.id.toString() !== ADMIN_ID?.toString()) {
+    return;
+  }
   const val = parseInt(ctx.message.text.split(" ")[1], 10);
   if (isNaN(val)) return ctx.reply("❌ Invalid number");
   await updateSettings("daily_codes_limit", val);
@@ -641,7 +651,9 @@ bot.hears(/^\/set_limit/, async (ctx) => {
 });
 
 bot.hears(/^\/set_days/, async (ctx) => {
-  if (ctx.from.id.toString() !== ADMIN_ID.toString()) return;
+  if (ctx.from.id.toString() !== ADMIN_ID?.toString()) {
+    return;
+  }
   const val = parseInt(ctx.message.text.split(" ")[1], 10);
   if (isNaN(val)) return ctx.reply("❌ Invalid number");
   await updateSettings("distribution_days", val);
@@ -649,7 +661,9 @@ bot.hears(/^\/set_days/, async (ctx) => {
 });
 
 bot.hears(/^\/set_group/, async (ctx) => {
-  if (ctx.from.id.toString() !== ADMIN_ID.toString()) return;
+  if (ctx.from.id.toString() !== ADMIN_ID?.toString()) {
+    return;
+  }
   const val = parseInt(ctx.message.text.split(" ")[1], 10);
   if (isNaN(val)) return ctx.reply("❌ Invalid number");
   // update admin_settings
