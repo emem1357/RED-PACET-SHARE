@@ -132,17 +132,21 @@ async function autoNameInGroup(groupId) {
 }
 
 // ====== main keyboard ======
-const mainKeyboard = (userId) => {
-  const base = [
-    ["/تسجيل", "/رفع_اكواد"],
-    ["/اكواد_اليوم", "/اكوادى"],
-    [{ text: "📱 إرسال رقم الهاتف", request_contact: true }],
+function mainKeyboard(userId) {
+  const isAdmin = userId.toString() === ADMIN_ID?.toString();
+
+  const buttons = [
+    [Markup.button.callback("/تسجيل", "register"), Markup.button.callback("/رفع_اكواد", "upload")],
+    [Markup.button.callback("/اكواد_اليوم", "today"), Markup.button.callback("/اكوادى", "mycodes")],
+    [Markup.button.requestContact("📱 إرسال رقم الهاتف")],
   ];
-  if (userId.toString() === ADMIN_ID.toString()) {
-    base.push(["/admin"]);
+
+  if (isAdmin) {
+    buttons.push([Markup.button.callback("/admin", "admin")]);
   }
-  return Markup.keyboard(base).resize();
-};
+
+  return Markup.keyboard(buttons).resize();
+}
 
 // ====== /start ======
 bot.start((ctx) => {
@@ -361,7 +365,7 @@ bot.on("contact", async (ctx) => {
 
     await ctx.reply(
       `✅ تم التسجيل بنجاح!\nالمجموعة: ${groupId}\nاسمك التلقائي: ${autoName}`,
-      mainKeyboard
+      mainKeyboard(ctx.from.id)
     );
     delete userState[tgId];
   } catch (err) {
