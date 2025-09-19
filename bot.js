@@ -136,13 +136,13 @@ function mainKeyboard(userId) {
   const isAdmin = userId.toString() === ADMIN_ID?.toString();
 
   const buttons = [
-  [Markup.button.callback("/تسجيل", "register"), Markup.button.callback("/رفع_اكواد", "upload")],
-  [Markup.button.callback("/اكواد_اليوم", "today"), Markup.button.callback("/اكوادى", "mycodes")],
+  [Markup.button.text("/تسجيل"), Markup.button.text("/رفع_اكواد")],
+  [Markup.button.text("/اكواد_اليوم"), Markup.button.text("/اكوادى")],
   [Markup.button.contactRequest("📱 إرسال رقم الهاتف")],
   ];
 
   if (isAdmin) {
-    buttons.push([Markup.button.callback("/admin", "admin")]);
+  buttons.push([Markup.button.text("/admin")]);
   }
 
   return Markup.keyboard(buttons).resize();
