@@ -138,7 +138,7 @@ const mainKeyboard = (userId) => {
     ["/اكواد_اليوم", "/اكوادى"],
     [{ text: "📱 إرسال رقم الهاتف", request_contact: true }],
   ];
-  if (userId.toString() === ADMIN_ID?.toString()) {
+  if (userId.toString() === ADMIN_ID.toString()) {
     base.push(["/admin"]);
   }
   return Markup.keyboard(base).resize();
@@ -179,7 +179,7 @@ bot.on("text", async (ctx) => {
   const uid = ctx.from.id.toString();
 
   // Broadcast mode
-  if (uid.toString() === ADMIN_ID?.toString() && adminBroadcastMode) {
+  if (uid.toString() === ADMIN_ID.toString() && adminBroadcastMode) {
     adminBroadcastMode = false;
     const message = ctx.message.text;
     try {
