@@ -3,6 +3,7 @@
 // Requires: telegraf, pg, dotenv, node-cron, express
 
 import { Telegraf, Markup } from "telegraf";
+import fs from "fs";
 import pkg from "pg";
 import dotenv from "dotenv";
 import cron from "node-cron";
@@ -16,6 +17,7 @@ const { Pool } = pkg;
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: {
+    ca: fs.readFileSync("./supabase-ca.crt").toString(),
     rejectUnauthorized: true
   }
 });
