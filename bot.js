@@ -537,7 +537,8 @@ cron.schedule("* * * * *", async () => {
     const now = new Date();
     const hour = now.getHours();
     const minute = now.getMinutes();
-    const ymdhm = `${now.getFullYear()}-${now.getMonth() + 1}-${now.getDate()} ${hour}:${minute}`;
+  const pad = (n) => n.toString().padStart(2,'0');
+  const ymdhm = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(hour)}:${pad(minute)}`;
     const sendHour = parseInt((s.send_time || "09:00:00").split(":")[0], 10);
     if (hour === sendHour && minute === 0 && lastRunDate !== ymdhm) {
       lastRunDate = ymdhm;
@@ -573,52 +574,58 @@ bot.hears(/^\/reset_cycle/, async (ctx) => {
     return ctx.reply("❌ مخصص للأدمن فقط.");
   }
   try {
-    await q("DELETE FROM code_view_assignments");
-    await q("DELETE FROM codes");
-    await ctx.reply("🔄 تم بدء دورة جديدة ومسح الأكواد والتوزيعات بنجاح!");
+    try { await q("DELETE FROM code_view_assignments"); } catch (err) { console.warn("code_view_assignments table may not exist or already empty."); }
+    try { await q("DELETE FROM codes"); } catch (err) { console.warn("codes table may not exist or already empty."); }
+    try { await ctx.reply("🔄 تم بدء دورة جديدة ومسح الأكواد والتوزيعات بنجاح!"); } catch(e) {}
   } catch (err) {
     console.error(err);
-    await ctx.reply("❌ حدث خطأ أثناء بدء الدورة الجديدة.");
+    try { await ctx.reply("❌ حدث خطأ أثناء بدء الدورة الجديدة."); } catch(e) {}
   }
 });
 
 // ====== callback handler ======
 bot.on("callback_query", async (ctx) => {
   if (ctx.from.id.toString() !== ADMIN_ID?.toString()) {
-    return ctx.answerCbQuery("❌ Not allowed");
+    await ctx.answerCbQuery("❌ Not allowed");
+    return;
   }
   const action = ctx.callbackQuery.data;
 
-  if (action === "toggle_scheduler") {
-    const s = await getSettings();
-    await updateSettings("is_scheduler_active", !s.is_scheduler_active);
-    await ctx.reply(`✅ Scheduler: ${!s.is_scheduler_active ? "Enabled" : "Disabled"}`);
-  } else if (action === "set_time") {
-    await ctx.reply("⏰ Send: /set_time 09:00");
-  } else if (action === "set_limit") {
-    await ctx.reply("👁️ Send: /set_limit 50");
-  } else if (action === "set_days") {
-    await ctx.reply("📅 Send: /set_days 20");
-  } else if (action === "set_group") {
-    await ctx.reply("👥 Send: /set_group 1000");
-  } else if (action === "broadcast") {
-    adminBroadcastMode = true;
-    await ctx.reply("📢 Send message to broadcast:");
-  } else if (action === "stats") {
-    const u = await q(`SELECT COUNT(*) FROM users`);
-    const c = await q(`SELECT COUNT(*) FROM codes`);
-    const s = await getSettings();
-    await ctx.reply(
-      `📊 Users: ${u.rows[0].count}\n` +
-        `Codes: ${c.rows[0].count}\n` +
-        `Scheduler: ${s.is_scheduler_active ? "On" : "Off"}\n` +
-        `Limit: ${s.daily_codes_limit}\n` +
-        `Days: ${s.distribution_days}\n` +
-        `Group: ${s.group_size}\n` +
-        `Time: ${s.send_time}`
-    );
+  try {
+    if (action === "toggle_scheduler") {
+      const s = await getSettings();
+      await updateSettings("is_scheduler_active", !s.is_scheduler_active);
+      try { await ctx.reply(`✅ Scheduler: ${!s.is_scheduler_active ? "Enabled" : "Disabled"}`); } catch(e) {}
+    } else if (action === "set_time") {
+      try { await ctx.reply("⏰ Send: /set_time 09:00"); } catch(e) {}
+    } else if (action === "set_limit") {
+      try { await ctx.reply("👁️ Send: /set_limit 50"); } catch(e) {}
+    } else if (action === "set_days") {
+      try { await ctx.reply("📅 Send: /set_days 20"); } catch(e) {}
+    } else if (action === "set_group") {
+      try { await ctx.reply("👥 Send: /set_group 1000"); } catch(e) {}
+    } else if (action === "broadcast") {
+      adminBroadcastMode = true;
+      try { await ctx.reply("📢 Send message to broadcast:"); } catch(e) {}
+    } else if (action === "stats") {
+      const u = await q(`SELECT COUNT(*) FROM users`);
+      const c = await q(`SELECT COUNT(*) FROM codes`);
+      const s = await getSettings();
+      try {
+        await ctx.reply(
+          `📊 Users: ${u.rows[0].count}\n` +
+            `Codes: ${c.rows[0].count}\n` +
+            `Scheduler: ${s.is_scheduler_active ? "On" : "Off"}\n` +
+            `Limit: ${s.daily_codes_limit}\n` +
+            `Days: ${s.distribution_days}\n` +
+            `Group: ${s.group_size}\n` +
+            `Time: ${s.send_time}`
+        );
+      } catch(e) {}
+    }
+  } finally {
+    await ctx.answerCbQuery();
   }
-  await ctx.answerCbQuery();
 });
 
 // ====== Admin text commands ======
@@ -685,7 +692,6 @@ if (RENDER_URL) {
       app.use((req, res, next) => {
   console.log("🔔 INCOMING REQUEST:", req.method, req.originalUrl, JSON.stringify(req.body));
   next();
-        next();
       });
 
       // ====== Telegraf Middleware ======
@@ -705,8 +711,10 @@ if (RENDER_URL) {
 
       // ====== Webhook route ======
       const webhookPath = `/${SECRET_PATH}`;
-      await bot.telegram.setWebhook(`${RENDER_URL.replace(/\/$/, '')}${webhookPath}`);
-      console.log(`✅ Webhook registered at: ${RENDER_URL.replace(/\/$/, '')}${webhookPath}`);
+  const finalWebhookURL = `${RENDER_URL.replace(/\/$/, '')}${webhookPath}`;
+  console.log(`🟡 Registering webhook URL: ${finalWebhookURL}`);
+  await bot.telegram.setWebhook(finalWebhookURL);
+  console.log(`✅ Webhook registered at: ${finalWebhookURL}`);
       app.use(bot.webhookCallback(webhookPath));
 
       // ====== Health-check endpoint ======
