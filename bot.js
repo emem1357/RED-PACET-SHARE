@@ -719,16 +719,16 @@ bot.catch((err, ctx) => {
       // register webhook URL with Telegram
       await bot.telegram.setWebhook(fullWebhookUrl);
 
-      // mount telegraf webhook middleware at the secret path (handles POST updates)
-      app.use(`/${SECRET_PATH}`, bot.webhookCallback());
+      // webhook route
+      app.post(`/${SECRET_PATH}`, bot.webhookCallback(`/${SECRET_PATH}`));
 
       // health-check
       app.get("/", (req, res) => res.send("✅ Bot server is running!"));
 
       // listen on the port provided by the environment (Render sets process.env.PORT)
-      const PORT = process.env.PORT || 3000;
+      const PORT = process.env.PORT || 10000;
       app.listen(PORT, () => {
-        console.log(`🚀 Webhook running on port ${PORT}, URL: ${fullWebhookUrl}`);
+        console.log("🚀 Webhook running...");
       });
     } catch (err) {
       console.error("❌ Failed to start webhook:", err);
