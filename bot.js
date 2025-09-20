@@ -683,52 +683,45 @@ if (RENDER_URL) {
     try {
       const app = express();
 
-// ====== TEMP DEBUG (remove after testing) ======
-app.use(express.json()); // تأكد أنها موجودة
-
-app.use((req, res, next) => {
-  console.log("🔔 INCOMING REQUEST:", req.method, req.originalUrl);
-  let body = "";
-  req.on("data", chunk => { body += chunk.toString().slice(0, 10000); });
-  req.on("end", () => {
-    if (body) console.log("🔸 body (trunc 1k):", body.slice(0,1000));
-  });
-  next();
-});
-
-// Telegraf-level logging
-bot.use((ctx, next) => {
-  try {
-    console.log("🪪 Telegraf update:", ctx.updateType, "from:", ctx.from?.id, "text:", ctx.message?.text);
-  } catch(e) {}
-  return next();
-});
-
-bot.catch((err, ctx) => {
-  console.error("❌ Telegraf unhandled error:", err?.stack || err, "update:", JSON.stringify(ctx.update).slice(0,1000));
-});
-
-      // ensure JSON body parsing
+      // ====== Express Middleware ======
       app.use(express.json());
 
-      const fullWebhookUrl = `${RENDER_URL.replace(/\/$/, "")}/${SECRET_PATH}`;
-      console.log("🔑 SECRET_PATH =", SECRET_PATH);
-      console.log("🌍 RENDER_URL  =", RENDER_URL);
-      console.log("📡 Full Webhook URL =", fullWebhookUrl);
+      // Debug middleware: log all requests
+      app.use((req, res, next) => {
+        console.log("🔔 INCOMING REQUEST:", req.method, req.originalUrl);
+        let body = "";
+        req.on("data", chunk => { body += chunk.toString().slice(0, 10000); });
+        req.on("end", () => {
+          if (body) console.log("🔸 body (trunc 1k):", body.slice(0,1000));
+        });
+        next();
+      });
 
-      // register webhook URL with Telegram
-      await bot.telegram.setWebhook(fullWebhookUrl);
+      // ====== Telegraf Middleware ======
+      bot.use((ctx, next) => {
+        try {
+          console.log("🪪 Telegraf update:", ctx.updateType, "from:", ctx.from?.id, "text:", ctx.message?.text);
+        } catch(e) {}
+        return next();
+      });
 
-      // webhook route
+      bot.catch((err, ctx) => {
+        console.error("❌ Telegraf unhandled error:", err?.stack || err, "update:", JSON.stringify(ctx.update).slice(0,1000));
+      });
+
+      // ====== Webhook route ======
+      await bot.telegram.setWebhook(`${RENDER_URL.replace(/\/$/, "")}/${SECRET_PATH}`);
       app.post(`/${SECRET_PATH}`, bot.webhookCallback(`/${SECRET_PATH}`));
 
-      // health-check
+      // ====== Health-check endpoint ======
       app.get("/", (req, res) => res.send("✅ Bot server is running!"));
 
-      // listen on the port provided by the environment (Render sets process.env.PORT)
+      // ====== Start server ======
       const PORT = process.env.PORT || 10000;
       app.listen(PORT, () => {
-        console.log("🚀 Webhook running...");
+        console.log(`🚀 Webhook running on port ${PORT}`);
+        console.log(`🔗 Webhook endpoint: /${SECRET_PATH}`);
+        console.log("🟢 Mode: webhook");
       });
     } catch (err) {
       console.error("❌ Failed to start webhook:", err);
@@ -741,6 +734,7 @@ bot.catch((err, ctx) => {
       await bot.telegram.deleteWebhook();
       bot.launch();
       console.log("🚀 Bot running with long polling...");
+      console.log("🟢 Mode: polling");
     } catch (err) {
       console.error("❌ Failed to start bot:", err);
     }
