@@ -92,6 +92,17 @@ async function getSettings() {
 
 async function updateSettings(field, value) {
   try {
+    const allowedFields = [
+      "daily_codes_limit",
+      "distribution_days",
+      "distribution_users",
+      "group_size",
+      "send_time",
+      "is_scheduler_active"
+    ];
+    if (!allowedFields.includes(field)) {
+      throw new Error("Invalid field");
+    }
     await q(`UPDATE admin_settings SET ${field}=$1 WHERE id=1`, [value]);
   } catch (err) {
     console.error("❌ updateSettings error:", err.message);
@@ -202,6 +213,7 @@ bot.on("text", async (ctx) => {
         try {
           await bot.telegram.sendMessage(row.telegram_id, `📢 رسالة من الأدمن:\n\n${message}`);
           success++;
+          await new Promise(r => setTimeout(r, 50)); // منع rate limits
         } catch (err) {
           console.error(`❌ Failed to send to ${row.telegram_id}:`, err.message);
         }
@@ -327,26 +339,13 @@ bot.on("contact", async (ctx) => {
 
     const phone = contact.phone_number;
     const dupPhone = await q("SELECT id FROM users WHERE phone=$1", [phone]);
-    if (dupPhone.rowCount > 0) {
-      await ctx.reply("⚠️ هذا الرقم مستخدم بالفعل.");
-      delete userState[tgId];
-      return;
-    }
-
     const dupTelegram = await q("SELECT id FROM users WHERE telegram_id=$1", [tgId]);
-    if (dupTelegram.rowCount > 0) {
-      await ctx.reply("⚠️ أنت مسجل بالفعل.");
-      delete userState[tgId];
-      return;
-    }
-
+    let dupBinance = { rowCount: 0 };
     if (st.binance) {
-      const dupBinance = await q("SELECT id FROM users WHERE binance_id=$1", [st.binance]);
-      if (dupBinance.rowCount > 0) {
-        await ctx.reply("⚠️ معرف بينانس هذا مسجل مسبقًا.");
-        delete userState[tgId];
-        return;
-      }
+      dupBinance = await q("SELECT id FROM users WHERE binance_id=$1", [st.binance]);
+    }
+    if (dupPhone.rowCount > 0 || dupTelegram.rowCount > 0 || dupBinance.rowCount > 0) {
+      return ctx.reply("⚠️ لا يمكنك استخدام /contact أكثر من مرة");
     }
 
     const settings = await getSettings();
@@ -452,7 +451,7 @@ bot.hears(/^\/اكوادى/, async (ctx) => {
 
 // ====== daily distribution (each code is one day; assign each active code once) ======
 async function runDailyDistribution() {
-  console.log("📌 Starting daily distribution...");
+  console.log("� بدء توزيع الأكواد اليومي...");
   try {
     const settings = await getSettings();
 
@@ -507,16 +506,12 @@ async function runDailyDistribution() {
         }
       }
 
-      try {
-        await q(`UPDATE codes SET status = 'distributed' WHERE id = $1`, [c.id]);
-      } catch (err) {
-        console.error("❌ Failed to update code status:", err.message);
-      }
-
-      console.log(`Code ${c.id} distributed to ${assignedCount}/${viewersNeeded}`);
+  // يمكن حفظ التوزيع في جدول code_distributions إذا أردت توزيع يومي
+  console.log(`🔸 Code ${c.id} distributed to ${assignedCount}/${viewersNeeded}`);
     }
 
-    console.log("✅ Distribution complete");
+  console.log(`📦 توزيع الأكواد اليومي انتهى. عدد الأكواد الموزعة: ${codesRes.rows.length}`);
+  console.log("✅ Distribution complete");
   } catch (err) {
     console.error("❌ runDailyDistribution error:", err.message);
   }
@@ -684,40 +679,38 @@ if (RENDER_URL) {
       const app = express();
 
       // ====== Express Middleware ======
-      app.use(express.json());
+      app.use(express.json()); // Only once, before webhookCallback
 
       // Debug middleware: log all requests
       app.use((req, res, next) => {
-        console.log("🔔 INCOMING REQUEST:", req.method, req.originalUrl);
-        let body = "";
-        req.on("data", chunk => { body += chunk.toString().slice(0, 10000); });
-        req.on("end", () => {
-          if (body) console.log("🔸 body (trunc 1k):", body.slice(0,1000));
-        });
+  console.log("🔔 INCOMING REQUEST:", req.method, req.originalUrl, JSON.stringify(req.body));
+  next();
         next();
       });
 
       // ====== Telegraf Middleware ======
       bot.use((ctx, next) => {
         try {
-          console.log("🪪 Telegraf update:", ctx.updateType, "from:", ctx.from?.id, "text:", ctx.message?.text);
+          const updateType = ctx.updateType || "unknown";
+          const fromId = ctx.from && ctx.from.id ? ctx.from.id : "unknown";
+          const messageText = ctx.message && ctx.message.text ? ctx.message.text : "";
+          console.log("🪪 Telegraf update:", updateType, "from:", fromId, "text:", messageText);
         } catch(e) {}
         return next();
       });
 
       bot.catch((err, ctx) => {
-        console.error("❌ Telegraf unhandled error:", err?.stack || err, "update:", JSON.stringify(ctx.update).slice(0,1000));
+        console.error("❌ Telegraf unhandled error:", err?.stack || err, "update:", JSON.stringify(ctx.update).slice(0,500));
       });
 
-  // ====== Webhook route ======
-  const webhookPath = `/${SECRET_PATH}`;
-  await bot.telegram.setWebhook(`${RENDER_URL.replace(/\/$/, '')}${webhookPath}`);
-  console.log(`✅ Webhook registered at: ${RENDER_URL.replace(/\/$/, '')}${webhookPath}`);
-  app.use(express.json());
-  app.use(bot.webhookCallback(webhookPath));
+      // ====== Webhook route ======
+      const webhookPath = `/${SECRET_PATH}`;
+      await bot.telegram.setWebhook(`${RENDER_URL.replace(/\/$/, '')}${webhookPath}`);
+      console.log(`✅ Webhook registered at: ${RENDER_URL.replace(/\/$/, '')}${webhookPath}`);
+      app.use(bot.webhookCallback(webhookPath));
 
       // ====== Health-check endpoint ======
-      app.get("/", (req, res) => res.send("✅ Bot server is running!"));
+      app.get("/", (req, res) => res.send("✅ Bot is live and webhook active"));
 
       // ====== Start server ======
       const PORT = process.env.PORT || 10000;
