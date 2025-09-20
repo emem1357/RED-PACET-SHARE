@@ -700,8 +700,19 @@ if (RENDER_URL) {
       // Set webhook on Telegram
       await bot.telegram.setWebhook(fullWebhookUrl);
 
-      // Mount Telegraf webhook callback
-      app.use(`/${secretPath}`, bot.webhookCallback());
+      // Ensure express.json() middleware is enabled
+      app.use(express.json());
+
+      // Webhook POST endpoint using SECRET_PATH from .env
+      app.post(`/${process.env.SECRET_PATH}`, async (req, res) => {
+        try {
+          await bot.handleUpdate(req.body);
+          res.sendStatus(200);
+        } catch (err) {
+          console.error("Webhook error:", err);
+          res.sendStatus(500);
+        }
+      });
 
       app.get("/", (req, res) => res.send("✅ Bot server is running!"));
 
