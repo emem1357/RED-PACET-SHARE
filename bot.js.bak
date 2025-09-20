@@ -1,0 +1,67 @@
+// bot.js
+// Telegram Bot — updated for "one code = one day" model and auto groups
+// Requires: telegraf, pg, dotenv, node-cron, express
+
+import { Telegraf, Markup } from "telegraf";
+import fs from "fs";
+import pkg from "pg";
+import dotenv from "dotenv";
+import cron from "node-cron";
+import express from "express";
+
+dotenv.config();
+
+// ====== Init Bot & DB ======
+const bot = new Telegraf(process.env.BOT_TOKEN);
+const { Pool } = pkg;
+
+// Read optional CA cert safely (if present)
+let sslConfig = false;
+try {
+  const ca = fs.readFileSync("./supabase-ca.crt").toString();
+  sslConfig = {
+    ca,
+    rejectUnauthorized: true,
+  };
+} catch (e) {
+  // file not found or can't read -> skip ssl (useful for local/dev)
+  console.warn("⚠️ supabase-ca.crt not found or unreadable — continuing without custom SSL CA.");
+}
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ...(sslConfig ? { ssl: sslConfig } : {}),
+});
+
+// ====== Admin ID (owner) ======
+const ADMIN_ID = process.env.ADMIN_ID; // keep as string from env
+
+// ====== simple DB query wrapper ======
+async function q(sql, params) {
+  const client = await pool.connect();
+  try {
+    return await client.query(sql, params);
+  } catch (err) {
+    console.error("❌ DB Error:", err.message, "\nSQL:", sql, "\nParams:", params);
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+// ====== Ensure admin_settings exists and defaults ======
+async function ensureAdminSettings() {
+  try {
+    await q(
+      `INSERT INTO admin_settings (id, daily_codes_limit, distribution_days, group_size, send_time, is_scheduler_active)
+       VALUES (1, 50, 20, 1000, '09:00:00', $1)
+       ON CONFLICT (id) DO NOTHING`,
+      [false] // ✅ use parameterized boolean
+    );
+  } catch (err) {
+    // ignore intentionally (we want getSettings to fallback)
+    console.warn("ensureAdminSettings warning:", err?.message || err);
+  }
+}
+
+// ...existing code...

@@ -683,6 +683,31 @@ if (RENDER_URL) {
     try {
       const app = express();
 
+// ====== TEMP DEBUG (remove after testing) ======
+app.use(express.json()); // تأكد أنها موجودة
+
+app.use((req, res, next) => {
+  console.log("🔔 INCOMING REQUEST:", req.method, req.originalUrl);
+  let body = "";
+  req.on("data", chunk => { body += chunk.toString().slice(0, 10000); });
+  req.on("end", () => {
+    if (body) console.log("🔸 body (trunc 1k):", body.slice(0,1000));
+  });
+  next();
+});
+
+// Telegraf-level logging
+bot.use((ctx, next) => {
+  try {
+    console.log("🪪 Telegraf update:", ctx.updateType, "from:", ctx.from?.id, "text:", ctx.message?.text);
+  } catch(e) {}
+  return next();
+});
+
+bot.catch((err, ctx) => {
+  console.error("❌ Telegraf unhandled error:", err?.stack || err, "update:", JSON.stringify(ctx.update).slice(0,1000));
+});
+
       // ensure JSON body parsing
       app.use(express.json());
 
