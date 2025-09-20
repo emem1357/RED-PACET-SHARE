@@ -14,16 +14,27 @@ dotenv.config();
 // ====== Init Bot & DB ======
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const { Pool } = pkg;
+
+// Read optional CA cert safely (if present)
+let sslConfig = false;
+try {
+  const ca = fs.readFileSync("./supabase-ca.crt").toString();
+  sslConfig = {
+    ca,
+    rejectUnauthorized: true,
+  };
+} catch (e) {
+  // file not found or can't read -> skip ssl (useful for local/dev)
+  console.warn("⚠️ supabase-ca.crt not found or unreadable — continuing without custom SSL CA.");
+}
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: {
-    ca: fs.readFileSync("./supabase-ca.crt").toString(),
-    rejectUnauthorized: true
-  }
+  ...(sslConfig ? { ssl: sslConfig } : {}),
 });
 
 // ====== Admin ID (owner) ======
-const ADMIN_ID = process.env.ADMIN_ID;
+const ADMIN_ID = process.env.ADMIN_ID; // keep as string from env
 
 // ====== simple DB query wrapper ======
 async function q(sql, params) {
@@ -45,10 +56,11 @@ async function ensureAdminSettings() {
       `INSERT INTO admin_settings (id, daily_codes_limit, distribution_days, group_size, send_time, is_scheduler_active)
        VALUES (1, 50, 20, 1000, '09:00:00', $1)
        ON CONFLICT (id) DO NOTHING`,
-      [false]
+      [false] // ✅ use parameterized boolean
     );
   } catch (err) {
-    // ignore
+    // ignore intentionally (we want getSettings to fallback)
+    console.warn("ensureAdminSettings warning:", err?.message || err);
   }
 }
 
@@ -94,7 +106,6 @@ let adminBroadcastMode = false;
 
 // ====== helpers: groups & auto-name ======
 async function assignGroupIdBySettings(groupSize) {
-  // find a group with count < max_users
   try {
     const res = await q(
       `SELECT g.id, COALESCE(u_count.count, 0) as members_count, g.max_users
@@ -110,7 +121,6 @@ async function assignGroupIdBySettings(groupSize) {
       return res.rows[0].id;
     }
 
-    // no existing group with room -> create new group
     const insert = await q(
       `INSERT INTO groups (name, max_users, created_at)
        VALUES ($1, $2, NOW())
@@ -120,7 +130,6 @@ async function assignGroupIdBySettings(groupSize) {
     return insert.rows[0].id;
   } catch (err) {
     console.error("❌ assignGroupIdBySettings error:", err.message);
-    // fallback: return null (should not happen often)
     return null;
   }
 }
@@ -133,16 +142,16 @@ async function autoNameInGroup(groupId) {
 
 // ====== main keyboard ======
 function mainKeyboard(userId) {
-  const isAdmin = userId.toString() === ADMIN_ID?.toString();
+  const isAdmin = userId?.toString() === ADMIN_ID?.toString();
 
   const buttons = [
-  [Markup.button.text("/تسجيل"), Markup.button.text("/رفع_اكواد")],
-  [Markup.button.text("/اكواد_اليوم"), Markup.button.text("/اكوادى")],
-  [Markup.button.contactRequest("📱 إرسال رقم الهاتف")],
+    [Markup.button.text("/تسجيل"), Markup.button.text("/رفع_اكواد")],
+    [Markup.button.text("/اكواد_اليوم"), Markup.button.text("/اكوادى")],
+    [Markup.button.contactRequest("📱 إرسال رقم الهاتف")],
   ];
 
   if (isAdmin) {
-  buttons.push([Markup.button.text("/admin")]);
+    buttons.push([Markup.button.text("/admin")]);
   }
 
   return Markup.keyboard(buttons).resize();
@@ -183,7 +192,7 @@ bot.on("text", async (ctx) => {
   const uid = ctx.from.id.toString();
 
   // Broadcast mode
-  if (uid.toString() === ADMIN_ID.toString() && adminBroadcastMode) {
+  if (uid.toString() === ADMIN_ID?.toString() && adminBroadcastMode) {
     adminBroadcastMode = false;
     const message = ctx.message.text;
     try {
@@ -267,7 +276,6 @@ bot.on("text", async (ctx) => {
         const owner_id = userrow.rows[0].id;
         const settings = await getSettings();
         const viewsPerDay = settings ? settings.daily_codes_limit : 50;
-        const daysCount = st.expectedCodes || 1;
 
         // insert each code as one row (one day)
         let inserted = 0;
@@ -311,7 +319,6 @@ bot.on("contact", async (ctx) => {
       return;
     }
 
-    // ensure shared contact belongs to the sender (Telegram sets contact.user_id)
     if (contact.user_id && contact.user_id.toString() !== tgId) {
       await ctx.reply("✋ يجب مشاركة رقم هاتفك الخاص فقط باستخدام زر '📱 إرسال رقم الهاتف'.");
       delete userState[tgId];
@@ -326,7 +333,6 @@ bot.on("contact", async (ctx) => {
       return;
     }
 
-    // check duplicate telegram id
     const dupTelegram = await q("SELECT id FROM users WHERE telegram_id=$1", [tgId]);
     if (dupTelegram.rowCount > 0) {
       await ctx.reply("⚠️ أنت مسجل بالفعل.");
@@ -334,7 +340,6 @@ bot.on("contact", async (ctx) => {
       return;
     }
 
-    // check binance duplicate
     if (st.binance) {
       const dupBinance = await q("SELECT id FROM users WHERE binance_id=$1", [st.binance]);
       if (dupBinance.rowCount > 0) {
@@ -349,7 +354,6 @@ bot.on("contact", async (ctx) => {
     const groupId = await assignGroupIdBySettings(groupSize);
     const autoName = await autoNameInGroup(groupId);
 
-    // Insert user
     try {
       await q(
         `INSERT INTO users (telegram_id, binance_id, phone, auto_name, group_id, verified, created_at)
@@ -452,7 +456,6 @@ async function runDailyDistribution() {
   try {
     const settings = await getSettings();
 
-    // get all active codes that haven't been distributed yet (status = 'active')
     const codesRes = await q(
       `SELECT id, owner_id, views_per_day
        FROM codes
@@ -460,30 +463,24 @@ async function runDailyDistribution() {
        ORDER BY created_at ASC`
     );
 
-    // get all users (ids)
     const usersRes = await q(`SELECT id FROM users`);
     const allUserIds = usersRes.rows.map(r => r.id);
 
     const today = new Date().toISOString().slice(0, 10);
 
     for (const c of codesRes.rows) {
-      // target number of viewers for this code
       const viewersNeeded = c.views_per_day || (settings ? settings.daily_codes_limit : 50);
       if (!viewersNeeded || viewersNeeded <= 0) {
         continue;
       }
 
-      // build list of candidate users (exclude owner)
       let candidates = allUserIds.filter(uid => uid !== c.owner_id);
-
-      // shuffle candidates
       candidates = candidates.sort(() => 0.5 - Math.random());
 
       let assignedCount = 0;
       for (const candidateId of candidates) {
         if (assignedCount >= viewersNeeded) break;
 
-        // skip if this candidate has seen any code from this owner before (to enforce 1 code per owner per user in the cycle)
         const seenBefore = await q(
           `SELECT 1 FROM code_view_assignments a
            JOIN codes cc ON a.code_id = cc.id
@@ -492,14 +489,12 @@ async function runDailyDistribution() {
         );
         if (seenBefore.rowCount > 0) continue;
 
-        // ensure not already assigned this code today (shouldn't be but check)
         const alreadyAssignedToday = await q(
           `SELECT 1 FROM code_view_assignments WHERE code_id=$1 AND assigned_to_user_id=$2 AND assigned_date=$3 LIMIT 1`,
           [c.id, candidateId, today]
         );
         if (alreadyAssignedToday.rowCount > 0) continue;
 
-        // assign
         try {
           await q(
             `INSERT INTO code_view_assignments (code_id, assigned_to_user_id, assigned_date, presented_at, used, verified)
@@ -509,11 +504,9 @@ async function runDailyDistribution() {
           assignedCount++;
         } catch (err) {
           console.error("❌ Failed to insert assignment:", err.message);
-          // continue to next candidate
         }
       }
 
-      // mark code as distributed so we don't distribute it again
       try {
         await q(`UPDATE codes SET status = 'distributed' WHERE id = $1`, [c.id]);
       } catch (err) {
@@ -683,28 +676,34 @@ bot.hears(/^\/set_group/, async (ctx) => {
 
 // ====== Webhook / Web Service setup ======
 const RENDER_URL = process.env.RENDER_URL || "";
-const secretPath = process.env.SECRET_PATH || "bot-webhook";
+const SECRET_PATH = process.env.SECRET_PATH || "bot-webhook";
 
 if (RENDER_URL) {
   (async () => {
     try {
       const app = express();
+
+      // ensure JSON body parsing
       app.use(express.json());
 
-      const secretPath = process.env.SECRET_PATH;
-      const fullWebhookUrl = `${RENDER_URL.replace(/\/$/, "")}/${secretPath}`;
+      const fullWebhookUrl = `${RENDER_URL.replace(/\/$/, "")}/${SECRET_PATH}`;
+      console.log("🔑 SECRET_PATH =", SECRET_PATH);
+      console.log("🌍 RENDER_URL  =", RENDER_URL);
+      console.log("📡 Full Webhook URL =", fullWebhookUrl);
+
+      // register webhook URL with Telegram
       await bot.telegram.setWebhook(fullWebhookUrl);
 
-      app.post(`/${secretPath}`, async (req, res) => {
-        await bot.handleUpdate(req.body);
-        res.sendStatus(200);
-      });
+      // mount telegraf webhook middleware at the secret path (handles POST updates)
+      app.use(`/${SECRET_PATH}`, bot.webhookCallback());
 
+      // health-check
       app.get("/", (req, res) => res.send("✅ Bot server is running!"));
 
+      // listen on the port provided by the environment (Render sets process.env.PORT)
       const PORT = process.env.PORT || 3000;
       app.listen(PORT, () => {
-        console.log(`🚀 Webhook running on port ${PORT}`);
+        console.log(`🚀 Webhook running on port ${PORT}, URL: ${fullWebhookUrl}`);
       });
     } catch (err) {
       console.error("❌ Failed to start webhook:", err);
