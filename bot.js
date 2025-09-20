@@ -710,9 +710,11 @@ if (RENDER_URL) {
       });
 
   // ====== Webhook route ======
-  await bot.telegram.setWebhook(`${RENDER_URL.replace(/\/$/, "")}/${SECRET_PATH}`);
+  const webhookPath = `/${SECRET_PATH}`;
+  await bot.telegram.setWebhook(`${RENDER_URL.replace(/\/$/, '')}${webhookPath}`);
+  console.log(`✅ Webhook registered at: ${RENDER_URL.replace(/\/$/, '')}${webhookPath}`);
   app.use(express.json());
-  app.use(bot.webhookCallback(`/${SECRET_PATH}`));
+  app.use(bot.webhookCallback(webhookPath));
 
       // ====== Health-check endpoint ======
       app.get("/", (req, res) => res.send("✅ Bot server is running!"));
