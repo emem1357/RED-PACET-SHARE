@@ -709,9 +709,10 @@ if (RENDER_URL) {
         console.error("❌ Telegraf unhandled error:", err?.stack || err, "update:", JSON.stringify(ctx.update).slice(0,1000));
       });
 
-      // ====== Webhook route ======
-      await bot.telegram.setWebhook(`${RENDER_URL.replace(/\/$/, "")}/${SECRET_PATH}`);
-      app.post(`/${SECRET_PATH}`, bot.webhookCallback(`/${SECRET_PATH}`));
+  // ====== Webhook route ======
+  await bot.telegram.setWebhook(`${RENDER_URL.replace(/\/$/, "")}/${SECRET_PATH}`);
+  app.use(express.json());
+  app.use(bot.webhookCallback(`/${SECRET_PATH}`));
 
       // ====== Health-check endpoint ======
       app.get("/", (req, res) => res.send("✅ Bot server is running!"));
