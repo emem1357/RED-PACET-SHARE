@@ -691,35 +691,21 @@ if (RENDER_URL) {
       const app = express();
       app.use(express.json());
 
-      console.log("🔑 SECRET_PATH =", secretPath);
-      console.log("🌍 RENDER_URL  =", RENDER_URL);
-
+      const secretPath = process.env.SECRET_PATH;
       const fullWebhookUrl = `${RENDER_URL.replace(/\/$/, "")}/${secretPath}`;
-      console.log("📡 Full Webhook URL =", fullWebhookUrl);
-
-      // Set webhook on Telegram
       await bot.telegram.setWebhook(fullWebhookUrl);
 
-      // Ensure express.json() middleware is enabled
-      app.use(express.json());
-
-      // Webhook POST endpoint using SECRET_PATH from .env
-      app.post(`/${process.env.SECRET_PATH}`, async (req, res) => {
-        try {
-          await bot.handleUpdate(req.body);
-          res.sendStatus(200);
-        } catch (err) {
-          console.error("Webhook error:", err);
-          res.sendStatus(500);
-        }
+      app.post(`/${secretPath}`, async (req, res) => {
+        await bot.handleUpdate(req.body);
+        res.sendStatus(200);
       });
 
       app.get("/", (req, res) => res.send("✅ Bot server is running!"));
 
       const PORT = process.env.PORT || 3000;
-      app.listen(PORT, () =>
-        console.log(`🚀 Webhook running on port ${PORT}, URL: ${fullWebhookUrl}`)
-      );
+      app.listen(PORT, () => {
+        console.log(`🚀 Webhook running on port ${PORT}`);
+      });
     } catch (err) {
       console.error("❌ Failed to start webhook:", err);
       process.exit(1);
