@@ -1,4 +1,4 @@
-// bot.js
+// bot.js - FIXED VERSION
 // Telegram Bot — updated for "one code = one day" model and auto groups
 // Requires: telegraf, pg, dotenv, node-cron, express
 
@@ -24,8 +24,7 @@ try {
     rejectUnauthorized: true,
   };
 } catch (e) {
-  // file not found or can't read -> skip ssl (useful for local/dev)
-  console.warn("⚠️ supabase-ca.crt not found or unreadable — continuing without custom SSL CA.");
+  console.warn("⚠️ supabase-ca.crt not found — continuing without custom SSL CA.");
 }
 
 const pool = new Pool({
@@ -56,10 +55,9 @@ async function ensureAdminSettings() {
       `INSERT INTO admin_settings (id, daily_codes_limit, distribution_days, group_size, send_time, is_scheduler_active)
        VALUES (1, 50, 20, 1000, '09:00:00', $1)
        ON CONFLICT (id) DO NOTHING`,
-      [false] // ✅ use parameterized boolean
+      [false]
     );
   } catch (err) {
-    // ignore intentionally (we want getSettings to fallback)
     console.warn("ensureAdminSettings warning:", err?.message || err);
   }
 }
@@ -112,7 +110,7 @@ async function updateSettings(field, value) {
 
 // ====== state ======
 const userState = {}; // keyed by telegram_id string
-let lastRunDate = null; // to prevent duplicate scheduler runs
+let lastRunDate = null;
 let adminBroadcastMode = false;
 
 // ====== helpers: groups & auto-name ======
@@ -151,6 +149,15 @@ async function autoNameInGroup(groupId) {
   return `User${count}`;
 }
 
+// ====== Safe Reply Helper ======
+async function safeReply(ctx, message, extra) {
+  try {
+    await ctx.reply(message, extra);
+  } catch (err) {
+    console.error("❌ Failed to send reply:", err.message);
+  }
+}
+
 // ====== main keyboard ======
 function mainKeyboard(userId) {
   const isAdmin = userId?.toString() === ADMIN_ID?.toString();
@@ -169,12 +176,13 @@ function mainKeyboard(userId) {
 }
 
 // ====== /start ======
-bot.start((ctx) => {
-  ctx.reply(
+bot.start(async (ctx) => {
+  await safeReply(
+    ctx,
     "👋 أهلاً بك في البوت!\n\n" +
       "استخدم الأزرار بالأسفل أو الأوامر التالية:\n" +
       "/تسجيل - للتسجيل\n" +
-      "/رفع_اكواد - لرفع الأكواد (ستُطلب عدد الأيام ثم ترسل الأكواد عددياً)\n" +
+      "/رفع_اكواد - لرفع الأكواد\n" +
       "/اكواد_اليوم - لعرض أكواد اليوم\n" +
       "/اكوادى - لعرض أكوادك",
     mainKeyboard(ctx.from.id)
@@ -187,16 +195,138 @@ bot.hears(/^\/تسجيل/, async (ctx) => {
     const tgId = ctx.from.id.toString();
     const exists = await q(`SELECT id FROM users WHERE telegram_id=$1`, [tgId]);
     if (exists.rowCount > 0) {
-      await ctx.reply("أنت مسجل بالفعل ✅");
-      return;
+      await safeReply(
+        ctx,
+        `📊 Users: ${u.rows[0].count}\n` +
+          `Codes: ${c.rows[0].count}\n` +
+          `Scheduler: ${s.is_scheduler_active ? "On" : "Off"}\n` +
+          `Limit: ${s.daily_codes_limit}\n` +
+          `Days: ${s.distribution_days}\n` +
+          `Group: ${s.group_size}\n` +
+          `Time: ${s.send_time}`
+      );
     }
-    userState[tgId] = { stage: "awaiting_binance" };
-    await ctx.reply("أدخل معرف بينانس الخاص بك:");
-  } catch (err) {
-    console.error("❌ registration error:", err.message);
-    await ctx.reply("❌ حدث خطأ داخلي. حاول لاحقًا.");
+  } finally {
+    await ctx.answerCbQuery();
   }
 });
+
+// ====== Admin text commands ======
+bot.hears(/^\/set_time/, async (ctx) => {
+  if (ctx.from.id.toString() !== ADMIN_ID?.toString()) {
+    return;
+  }
+  const time = ctx.message.text.split(" ")[1];
+  if (!/^\d{2}:\d{2}$/.test(time)) return safeReply(ctx, "❌ Invalid format. Example: /set_time 09:00");
+  await updateSettings("send_time", time);
+  await safeReply(ctx, `✅ Send time set to ${time}`);
+});
+
+bot.hears(/^\/set_limit/, async (ctx) => {
+  if (ctx.from.id.toString() !== ADMIN_ID?.toString()) {
+    return;
+  }
+  const val = parseInt(ctx.message.text.split(" ")[1], 10);
+  if (isNaN(val)) return safeReply(ctx, "❌ Invalid number");
+  await updateSettings("daily_codes_limit", val);
+  await safeReply(ctx, `✅ Daily limit set to ${val}`);
+});
+
+bot.hears(/^\/set_days/, async (ctx) => {
+  if (ctx.from.id.toString() !== ADMIN_ID?.toString()) {
+    return;
+  }
+  const val = parseInt(ctx.message.text.split(" ")[1], 10);
+  if (isNaN(val)) return safeReply(ctx, "❌ Invalid number");
+  await updateSettings("distribution_days", val);
+  await safeReply(ctx, `✅ Distribution days set to ${val}`);
+});
+
+bot.hears(/^\/set_group/, async (ctx) => {
+  if (ctx.from.id.toString() !== ADMIN_ID?.toString()) {
+    return;
+  }
+  const val = parseInt(ctx.message.text.split(" ")[1], 10);
+  if (isNaN(val)) return safeReply(ctx, "❌ Invalid number");
+  await updateSettings("group_size", val);
+  try {
+    await q("UPDATE groups SET max_users = $1", [val]);
+  } catch (err) {
+    console.error("❌ Failed to update groups.max_users:", err.message);
+  }
+  await safeReply(ctx, `✅ Group size set to ${val}`);
+});
+
+// ====== Global error handler ======
+bot.catch((err, ctx) => {
+  console.error("❌ Telegraf unhandled error:", err?.stack || err);
+  console.error("Update:", JSON.stringify(ctx.update).slice(0, 500));
+});
+
+// ====== Webhook / Web Service setup ======
+const RENDER_URL = process.env.RENDER_URL || "";
+const SECRET_PATH = process.env.SECRET_PATH || "bot-webhook";
+
+if (RENDER_URL) {
+  (async () => {
+    try {
+      const app = express();
+
+      // ====== Express Middleware ======
+      app.use(express.json());
+
+      // Debug middleware: log all requests
+      app.use((req, res, next) => {
+        console.log("🔔 REQUEST:", req.method, req.originalUrl);
+        next();
+      });
+
+      // ====== Health-check endpoint ======
+      app.get("/", (req, res) => {
+        res.send("✅ Bot is live and webhook active");
+      });
+
+      // ====== Webhook route - CRITICAL FIX ======
+      const webhookPath = `/${SECRET_PATH}`;
+      const finalWebhookURL = `${RENDER_URL.replace(/\/$/, '')}${webhookPath}`;
+
+      console.log(`🟡 Setting webhook URL: ${finalWebhookURL}`);
+      await bot.telegram.setWebhook(finalWebhookURL);
+      console.log(`✅ Webhook registered successfully`);
+
+      // Use POST for webhook (not app.use!)
+      app.post(webhookPath, (req, res) => {
+        bot.handleUpdate(req.body, res);
+      });
+
+      // ====== Start server ======
+      const PORT = process.env.PORT || 10000;
+      app.listen(PORT, () => {
+        console.log(`🚀 Webhook running on port ${PORT}`);
+        console.log(`🔗 Webhook endpoint: ${webhookPath}`);
+        console.log("🟢 Mode: webhook");
+      });
+    } catch (err) {
+      console.error("❌ Failed to start webhook:", err);
+      process.exit(1);
+    }
+  })();
+} else {
+  (async () => {
+    try {
+      await bot.telegram.deleteWebhook();
+      bot.launch();
+      console.log("🚀 Bot running with long polling...");
+      console.log("🟢 Mode: polling");
+    } catch (err) {
+      console.error("❌ Failed to start bot:", err);
+    }
+  })();
+}
+
+// Graceful shutdown
+process.once("SIGINT", () => bot.stop("SIGINT"));
+process.once("SIGTERM", () => bot.stop("SIGTERM"));
 
 // ====== text handler ======
 bot.on("text", async (ctx) => {
@@ -213,32 +343,35 @@ bot.on("text", async (ctx) => {
         try {
           await bot.telegram.sendMessage(row.telegram_id, `📢 رسالة من الأدمن:\n\n${message}`);
           success++;
-          await new Promise(r => setTimeout(r, 50)); // منع rate limits
+          await new Promise(r => setTimeout(r, 50));
         } catch (err) {
           console.error(`❌ Failed to send to ${row.telegram_id}:`, err.message);
         }
       }
-      await ctx.reply(`✅ تم إرسال الرسالة إلى ${success} مستخدم.`);
+      await safeReply(ctx, `✅ تم إرسال الرسالة إلى ${success} مستخدم.`);
     } catch (err) {
       console.error("❌ broadcast error:", err.message);
-      await ctx.reply("❌ حدث خطأ أثناء الإرسال.");
+      await safeReply(ctx, "❌ حدث خطأ أثناء الإرسال.");
     }
     return;
   }
 
   const st = userState[uid];
-  if (!st) return;
+  if (!st) {
+    // No active state - ignore or give hint
+    return;
+  }
 
   // registration binance -> ask phone
   if (st.stage === "awaiting_binance") {
     const binance = ctx.message.text.trim();
     if (!binance || binance.length > 100) {
-      await ctx.reply("⚠️ معرف غير صالح، حاول مجددًا.");
+      await safeReply(ctx, "⚠️ معرف غير صالح، حاول مجددًا.");
       return;
     }
     st.binance = binance;
     st.stage = "awaiting_phone";
-    await ctx.reply("أرسل رقم هاتفك عبر زر المشاركة:", {
+    await safeReply(ctx, "أرسل رقم هاتفك عبر زر المشاركة:", {
       reply_markup: {
         keyboard: [[{ text: "📱 إرسال رقم الهاتف", request_contact: true }]],
         one_time_keyboard: true,
@@ -252,13 +385,13 @@ bot.on("text", async (ctx) => {
   if (st.stage === "awaiting_days") {
     const n = parseInt(ctx.message.text.trim(), 10);
     if (isNaN(n) || n <= 0 || n > 365) {
-      await ctx.reply("⚠️ أكتب عدد أيام صالح (1 - 365).");
+      await safeReply(ctx, "⚠️ أكتب عدد أيام صالح (1 - 365).");
       return;
     }
     st.expectedCodes = n;
     st.codes = [];
     st.stage = "uploading_codes";
-    await ctx.reply(`تمام. أرسل ${n} أكواد واحدًا في كل رسالة. اكتب /done عند الانتهاء.`);
+    await safeReply(ctx, `تمام. أرسل ${n} أكواد واحدًا في كل رسالة. اكتب /done عند الانتهاء.`);
     return;
   }
 
@@ -268,12 +401,12 @@ bot.on("text", async (ctx) => {
     if (text === "/done" || text === "/انتهيت") {
       const codes = st.codes || [];
       if (codes.length === 0) {
-        await ctx.reply("لم يتم استلام أي كود.");
+        await safeReply(ctx, "لم يتم استلام أي كود.");
         delete userState[uid];
         return;
       }
       if (st.expectedCodes && codes.length !== st.expectedCodes) {
-        await ctx.reply(`⚠️ عدد الأكواد غير متطابق مع عدد الأيام (${st.expectedCodes}). أرسل باقي الأكواد أو اكتب /انتهيت لإلغاء.`);
+        await safeReply(ctx, `⚠️ عدد الأكواد غير متطابق (${codes.length}/${st.expectedCodes}). أرسل الباقي أو /انتهيت للإلغاء.`);
         return;
       }
 
@@ -281,7 +414,7 @@ bot.on("text", async (ctx) => {
       try {
         const userrow = await q("SELECT id FROM users WHERE telegram_id=$1", [uid]);
         if (userrow.rowCount === 0) {
-          await ctx.reply("⚠️ لم يتم العثور على المستخدم في قاعدة البيانات. يرجى التسجيل أولًا.");
+          await safeReply(ctx, "⚠️ لم يتم العثور على المستخدم. يرجى التسجيل أولًا.");
           delete userState[uid];
           return;
         }
@@ -289,7 +422,6 @@ bot.on("text", async (ctx) => {
         const settings = await getSettings();
         const viewsPerDay = settings ? settings.daily_codes_limit : 50;
 
-        // insert each code as one row (one day)
         let inserted = 0;
         for (const c of codes) {
           try {
@@ -303,10 +435,10 @@ bot.on("text", async (ctx) => {
             console.error("❌ insert code error:", err.message);
           }
         }
-        await ctx.reply(`✅ تم حفظ ${inserted} أكواد. شكراً!`);
+        await safeReply(ctx, `✅ تم حفظ ${inserted} أكواد. شكراً!`);
       } catch (err) {
         console.error("❌ finishing upload codes error:", err.message);
-        await ctx.reply("❌ حدث خطأ أثناء حفظ الأكواد.");
+        await safeReply(ctx, "❌ حدث خطأ أثناء حفظ الأكواد.");
       }
 
       delete userState[uid];
@@ -315,7 +447,7 @@ bot.on("text", async (ctx) => {
 
     // otherwise push code
     st.codes.push(text);
-    await ctx.reply(`استلمت الكود رقم ${st.codes.length}.`);
+    await safeReply(ctx, `استلمت الكود رقم ${st.codes.length}.`);
     return;
   }
 });
@@ -327,12 +459,12 @@ bot.on("contact", async (ctx) => {
     const tgId = ctx.from.id.toString();
     const st = userState[tgId];
     if (!st || st.stage !== "awaiting_phone") {
-      await ctx.reply("ابدأ التسجيل بكتابة /تسجيل");
+      await safeReply(ctx, "ابدأ التسجيل بكتابة /تسجيل");
       return;
     }
 
     if (contact.user_id && contact.user_id.toString() !== tgId) {
-      await ctx.reply("✋ يجب مشاركة رقم هاتفك الخاص فقط باستخدام زر '📱 إرسال رقم الهاتف'.");
+      await safeReply(ctx, "✋ يجب مشاركة رقم هاتفك الخاص فقط.");
       delete userState[tgId];
       return;
     }
@@ -345,7 +477,7 @@ bot.on("contact", async (ctx) => {
       dupBinance = await q("SELECT id FROM users WHERE binance_id=$1", [st.binance]);
     }
     if (dupPhone.rowCount > 0 || dupTelegram.rowCount > 0 || dupBinance.rowCount > 0) {
-      return ctx.reply("⚠️ لا يمكنك استخدام /contact أكثر من مرة");
+      return safeReply(ctx, "⚠️ لا يمكنك التسجيل أكثر من مرة");
     }
 
     const settings = await getSettings();
@@ -361,19 +493,20 @@ bot.on("contact", async (ctx) => {
       );
     } catch (err) {
       console.error("❌ failed to insert user:", err.message);
-      await ctx.reply("❌ حدث خطأ أثناء حفظ بياناتك، حاول لاحقًا.");
+      await safeReply(ctx, "❌ حدث خطأ أثناء حفظ بياناتك، حاول لاحقًا.");
       delete userState[tgId];
       return;
     }
 
-    await ctx.reply(
+    await safeReply(
+      ctx,
       `✅ تم التسجيل بنجاح!\nالمجموعة: ${groupId}\nاسمك التلقائي: ${autoName}`,
       mainKeyboard(ctx.from.id)
     );
     delete userState[tgId];
   } catch (err) {
     console.error("❌ contact handler error:", err.message);
-    await ctx.reply("❌ حدث خطأ داخلي أثناء التسجيل.");
+    await safeReply(ctx, "❌ حدث خطأ داخلي أثناء التسجيل.");
   }
 });
 
@@ -383,14 +516,14 @@ bot.hears(/^\/رفع_اكواد/, async (ctx) => {
     const uid = ctx.from.id.toString();
     const res = await q("SELECT id FROM users WHERE telegram_id=$1", [uid]);
     if (res.rowCount === 0) {
-      await ctx.reply("سجل أولًا باستخدام /تسجيل");
+      await safeReply(ctx, "سجل أولًا باستخدام /تسجيل");
       return;
     }
     userState[uid] = { stage: "awaiting_days" };
-    await ctx.reply("كم عدد الأيام (عدد الأكواد) التي تريد رفعها؟ اكتب رقماً:");
+    await safeReply(ctx, "كم عدد الأيام (عدد الأكواد) التي تريد رفعها؟ اكتب رقماً:");
   } catch (err) {
     console.error("❌ رفع_اكواد start error:", err.message);
-    await ctx.reply("❌ حدث خطأ، حاول لاحقًا.");
+    await safeReply(ctx, "❌ حدث خطأ، حاول لاحقًا.");
   }
 });
 
@@ -400,7 +533,7 @@ bot.hears(/^\/اكواد_اليوم/, async (ctx) => {
     const uid = ctx.from.id.toString();
     const u = await q("SELECT id FROM users WHERE telegram_id=$1", [uid]);
     if (u.rowCount === 0) {
-      await ctx.reply("سجل أولًا باستخدام /تسجيل");
+      await safeReply(ctx, "سجل أولًا باستخدام /تسجيل");
       return;
     }
     const userId = u.rows[0].id;
@@ -413,16 +546,16 @@ bot.hears(/^\/اكواد_اليوم/, async (ctx) => {
       [userId, today]
     );
     if (res.rowCount === 0) {
-      await ctx.reply("لا يوجد أكواد اليوم.");
+      await safeReply(ctx, "لا يوجد أكواد اليوم.");
       return;
     }
     for (const row of res.rows) {
       const used = row.used ? "✅ مستخدم" : "🔲 غير مستخدم";
-      await ctx.reply(`${row.code_text}\nالحالة: ${used}`);
+      await safeReply(ctx, `${row.code_text}\nالحالة: ${used}`);
     }
   } catch (err) {
     console.error("❌ اكواد_اليوم error:", err.message);
-    await ctx.reply("❌ حدث خطأ، حاول لاحقًا.");
+    await safeReply(ctx, "❌ حدث خطأ، حاول لاحقًا.");
   }
 });
 
@@ -432,26 +565,26 @@ bot.hears(/^\/اكوادى/, async (ctx) => {
     const uid = ctx.from.id.toString();
     const res = await q("SELECT id FROM users WHERE telegram_id=$1", [uid]);
     if (res.rowCount === 0) {
-      await ctx.reply("سجل أولًا باستخدام /تسجيل");
+      await safeReply(ctx, "سجل أولًا باستخدام /تسجيل");
       return;
     }
     const userId = res.rows[0].id;
     const codes = await q("SELECT code_text, status, created_at FROM codes WHERE owner_id=$1 ORDER BY created_at DESC", [userId]);
     if (codes.rowCount === 0) {
-      await ctx.reply("❌ لا توجد لديك أكواد.");
+      await safeReply(ctx, "❌ لا توجد لديك أكواد.");
       return;
     }
     const list = codes.rows.map((c, i) => `${i + 1}. ${c.code_text} (${c.status || 'active'})`).join("\n");
-    await ctx.reply(`📋 أكوادك:\n${list}`);
+    await safeReply(ctx, `📋 أكوادك:\n${list}`);
   } catch (err) {
     console.error("❌ اكوادى error:", err.message);
-    await ctx.reply("❌ حدث خطأ، حاول لاحقًا.");
+    await safeReply(ctx, "❌ حدث خطأ، حاول لاحقًا.");
   }
 });
 
-// ====== daily distribution (each code is one day; assign each active code once) ======
+// ====== daily distribution ======
 async function runDailyDistribution() {
-  console.log("� بدء توزيع الأكواد اليومي...");
+  console.log("📦 بدء توزيع الأكواد اليومي...");
   try {
     const settings = await getSettings();
 
@@ -506,18 +639,16 @@ async function runDailyDistribution() {
         }
       }
 
-  // يمكن حفظ التوزيع في جدول code_distributions إذا أردت توزيع يومي
-  console.log(`🔸 Code ${c.id} distributed to ${assignedCount}/${viewersNeeded}`);
+      console.log(`🔸 Code ${c.id} distributed to ${assignedCount}/${viewersNeeded}`);
     }
 
-  console.log(`📦 توزيع الأكواد اليومي انتهى. عدد الأكواد الموزعة: ${codesRes.rows.length}`);
-  console.log("✅ Distribution complete");
+    console.log(`✅ Distribution complete. Codes: ${codesRes.rows.length}`);
   } catch (err) {
     console.error("❌ runDailyDistribution error:", err.message);
   }
 }
 
-// ====== monthly reset cycle (1st day of each month at 00:00) ======
+// ====== monthly reset cycle ======
 cron.schedule("0 0 1 * *", async () => {
   try {
     console.log("🔄 بدء دورة جديدة - مسح الأكواد والتوزيعات...");
@@ -537,8 +668,8 @@ cron.schedule("* * * * *", async () => {
     const now = new Date();
     const hour = now.getHours();
     const minute = now.getMinutes();
-  const pad = (n) => n.toString().padStart(2,'0');
-  const ymdhm = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(hour)}:${pad(minute)}`;
+    const pad = (n) => n.toString().padStart(2,'0');
+    const ymdhm = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(hour)}:${pad(minute)}`;
     const sendHour = parseInt((s.send_time || "09:00:00").split(":")[0], 10);
     if (hour === sendHour && minute === 0 && lastRunDate !== ymdhm) {
       lastRunDate = ymdhm;
@@ -552,7 +683,7 @@ cron.schedule("* * * * *", async () => {
 // ====== Admin panel ======
 bot.command("admin", async (ctx) => {
   if (ctx.from.id.toString() !== ADMIN_ID?.toString()) {
-    return ctx.reply("❌ مخصص للأدمن فقط.");
+    return safeReply(ctx, "❌ مخصص للأدمن فقط.");
   }
 
   const keyboard = Markup.inlineKeyboard([
@@ -565,21 +696,21 @@ bot.command("admin", async (ctx) => {
     [Markup.button.callback("📊 Stats", "stats")],
   ]);
 
-  await ctx.reply("🔐 Admin Panel:", keyboard);
+  await safeReply(ctx, "🔐 Admin Panel:", keyboard);
 });
 
 // ====== reset cycle for admin ======
 bot.hears(/^\/reset_cycle/, async (ctx) => {
   if (ctx.from.id.toString() !== ADMIN_ID?.toString()) {
-    return ctx.reply("❌ مخصص للأدمن فقط.");
+    return safeReply(ctx, "❌ مخصص للأدمن فقط.");
   }
   try {
-    try { await q("DELETE FROM code_view_assignments"); } catch (err) { console.warn("code_view_assignments table may not exist or already empty."); }
-    try { await q("DELETE FROM codes"); } catch (err) { console.warn("codes table may not exist or already empty."); }
-    try { await ctx.reply("🔄 تم بدء دورة جديدة ومسح الأكواد والتوزيعات بنجاح!"); } catch(e) {}
+    await q("DELETE FROM code_view_assignments");
+    await q("DELETE FROM codes");
+    await safeReply(ctx, "🔄 تم بدء دورة جديدة ومسح الأكواد بنجاح!");
   } catch (err) {
     console.error(err);
-    try { await ctx.reply("❌ حدث خطأ أثناء بدء الدورة الجديدة."); } catch(e) {}
+    await safeReply(ctx, "❌ حدث خطأ أثناء بدء الدورة الجديدة.");
   }
 });
 
@@ -595,152 +726,34 @@ bot.on("callback_query", async (ctx) => {
     if (action === "toggle_scheduler") {
       const s = await getSettings();
       await updateSettings("is_scheduler_active", !s.is_scheduler_active);
-      try { await ctx.reply(`✅ Scheduler: ${!s.is_scheduler_active ? "Enabled" : "Disabled"}`); } catch(e) {}
+      await safeReply(ctx, `✅ Scheduler: ${!s.is_scheduler_active ? "Enabled" : "Disabled"}`);
     } else if (action === "set_time") {
-      try { await ctx.reply("⏰ Send: /set_time 09:00"); } catch(e) {}
+      await safeReply(ctx, "⏰ Send: /set_time 09:00");
     } else if (action === "set_limit") {
-      try { await ctx.reply("👁️ Send: /set_limit 50"); } catch(e) {}
+      await safeReply(ctx, "👁️ Send: /set_limit 50");
     } else if (action === "set_days") {
-      try { await ctx.reply("📅 Send: /set_days 20"); } catch(e) {}
+      await safeReply(ctx, "📅 Send: /set_days 20");
     } else if (action === "set_group") {
-      try { await ctx.reply("👥 Send: /set_group 1000"); } catch(e) {}
+      await safeReply(ctx, "👥 Send: /set_group 1000");
     } else if (action === "broadcast") {
       adminBroadcastMode = true;
-      try { await ctx.reply("📢 Send message to broadcast:"); } catch(e) {}
+      await safeReply(ctx, "📢 Send message to broadcast:");
     } else if (action === "stats") {
       const u = await q(`SELECT COUNT(*) FROM users`);
       const c = await q(`SELECT COUNT(*) FROM codes`);
-      const s = await getSettings();
-      try {
-        await ctx.reply(
-          `📊 Users: ${u.rows[0].count}\n` +
-            `Codes: ${c.rows[0].count}\n` +
-            `Scheduler: ${s.is_scheduler_active ? "On" : "Off"}\n` +
-            `Limit: ${s.daily_codes_limit}\n` +
-            `Days: ${s.distribution_days}\n` +
-            `Group: ${s.group_size}\n` +
-            `Time: ${s.send_time}`
-        );
-      } catch(e) {}
-    }
-  } finally {
-    await ctx.answerCbQuery();
-  }
-});
-
-// ====== Admin text commands ======
-bot.hears(/^\/set_time/, async (ctx) => {
-  if (ctx.from.id.toString() !== ADMIN_ID?.toString()) {
-    return;
-  }
-  const time = ctx.message.text.split(" ")[1];
-  if (!/^\d{2}:\d{2}$/.test(time)) return ctx.reply("❌ Invalid format. Example: /set_time 09:00");
-  await updateSettings("send_time", time);
-  await ctx.reply(`✅ Send time set to ${time}`);
-});
-
-bot.hears(/^\/set_limit/, async (ctx) => {
-  if (ctx.from.id.toString() !== ADMIN_ID?.toString()) {
-    return;
-  }
-  const val = parseInt(ctx.message.text.split(" ")[1], 10);
-  if (isNaN(val)) return ctx.reply("❌ Invalid number");
-  await updateSettings("daily_codes_limit", val);
-  await ctx.reply(`✅ Daily limit set to ${val}`);
-});
-
-bot.hears(/^\/set_days/, async (ctx) => {
-  if (ctx.from.id.toString() !== ADMIN_ID?.toString()) {
-    return;
-  }
-  const val = parseInt(ctx.message.text.split(" ")[1], 10);
-  if (isNaN(val)) return ctx.reply("❌ Invalid number");
-  await updateSettings("distribution_days", val);
-  await ctx.reply(`✅ Distribution days set to ${val}`);
-});
-
-bot.hears(/^\/set_group/, async (ctx) => {
-  if (ctx.from.id.toString() !== ADMIN_ID?.toString()) {
-    return;
-  }
-  const val = parseInt(ctx.message.text.split(" ")[1], 10);
-  if (isNaN(val)) return ctx.reply("❌ Invalid number");
-  // update admin_settings
-  await updateSettings("group_size", val);
-  // update groups.max_users so DB reflects the change for future groups
-  try {
-    await q("UPDATE groups SET max_users = $1", [val]);
-  } catch (err) {
-    console.error("❌ Failed to update groups.max_users:", err.message);
-  }
-  await ctx.reply(`✅ Group size set to ${val}`);
-});
-
-// ====== Webhook / Web Service setup ======
-const RENDER_URL = process.env.RENDER_URL || "";
-const SECRET_PATH = process.env.SECRET_PATH || "bot-webhook";
-
-if (RENDER_URL) {
-  (async () => {
-    try {
-      const app = express();
-
-      // ====== Express Middleware ======
-      app.use(express.json()); // Only once, before webhookCallback
-
-      // Debug middleware: log all requests
-      app.use((req, res, next) => {
-  console.log("🔔 INCOMING REQUEST:", req.method, req.originalUrl, JSON.stringify(req.body));
-  next();
+            const s = await getSettings();
+            await safeReply(ctx,
+              `📊 Users: ${u.rows[0].count}\n` +
+              `Codes: ${c.rows[0].count}\n` +
+              `Scheduler: ${s.is_scheduler_active ? "On" : "Off"}\n` +
+              `Limit: ${s.daily_codes_limit}\n` +
+              `Days: ${s.distribution_days}\n` +
+              `Group: ${s.group_size}\n` +
+              `Time: ${s.send_time}`
+            );
+          }
+        } catch (err) {
+          console.error("❌ callback_query error:", err.message);
+          await safeReply(ctx, "❌ حدث خطأ أثناء تنفيذ العملية.");
+        }
       });
-
-      // ====== Telegraf Middleware ======
-      bot.use((ctx, next) => {
-        try {
-          const updateType = ctx.updateType || "unknown";
-          const fromId = ctx.from && ctx.from.id ? ctx.from.id : "unknown";
-          const messageText = ctx.message && ctx.message.text ? ctx.message.text : "";
-          console.log("🪪 Telegraf update:", updateType, "from:", fromId, "text:", messageText);
-        } catch(e) {}
-        return next();
-      });
-
-      bot.catch((err, ctx) => {
-        console.error("❌ Telegraf unhandled error:", err?.stack || err, "update:", JSON.stringify(ctx.update).slice(0,500));
-      });
-
-      // ====== Webhook route ======
-      const webhookPath = `/${SECRET_PATH}`;
-  const finalWebhookURL = `${RENDER_URL.replace(/\/$/, '')}${webhookPath}`;
-  console.log(`🟡 Registering webhook URL: ${finalWebhookURL}`);
-  await bot.telegram.setWebhook(finalWebhookURL);
-  console.log(`✅ Webhook registered at: ${finalWebhookURL}`);
-      app.use(bot.webhookCallback(webhookPath));
-
-      // ====== Health-check endpoint ======
-      app.get("/", (req, res) => res.send("✅ Bot is live and webhook active"));
-
-      // ====== Start server ======
-      const PORT = process.env.PORT || 10000;
-      app.listen(PORT, () => {
-        console.log(`🚀 Webhook running on port ${PORT}`);
-        console.log(`🔗 Webhook endpoint: /${SECRET_PATH}`);
-        console.log("🟢 Mode: webhook");
-      });
-    } catch (err) {
-      console.error("❌ Failed to start webhook:", err);
-      process.exit(1);
-    }
-  })();
-} else {
-  (async () => {
-    try {
-      await bot.telegram.deleteWebhook();
-      bot.launch();
-      console.log("🚀 Bot running with long polling...");
-      console.log("🟢 Mode: polling");
-    } catch (err) {
-      console.error("❌ Failed to start bot:", err);
-    }
-  })();
-}
