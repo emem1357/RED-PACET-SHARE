@@ -240,6 +240,8 @@ bot.hears(/^\/set_group/, async (ctx) => {
 
 bot.on("text", async (ctx) => {
   const uid = ctx.from.id.toString();
+  const text = ctx.message.text;
+  console.log(`📝 Text received from ${uid}: "${text}"`);
 
   if (uid === ADMIN_ID && adminBroadcastMode) {
     adminBroadcastMode = false;
@@ -264,7 +266,12 @@ bot.on("text", async (ctx) => {
   }
 
   const st = userState[uid];
-  if (!st) return;
+  if (!st) {
+    console.log(`⚠️ No state for user ${uid}`);
+    return;
+  }
+
+  console.log(`🔍 User ${uid} state:`, st.stage);
 
   if (st.stage === "awaiting_binance") {
     const binance = ctx.message.text.trim();
@@ -279,6 +286,7 @@ bot.on("text", async (ctx) => {
   }
 
   if (st.stage === "awaiting_days") {
+    console.log(`✅ awaiting_days stage for ${uid}`);
     const n = parseInt(ctx.message.text.trim(), 10);
     if (isNaN(n) || n <= 0 || n > 365) {
       return safeReply(ctx, "⚠️ أكتب عدد أيام صالح (1 - 365).");
@@ -335,6 +343,7 @@ bot.on("text", async (ctx) => {
 });
 
 bot.hears(/^\/رفع_اكواد/, async (ctx) => {
+  console.log("✅ Handler /رفع_اكواد triggered");
   try {
     const uid = ctx.from.id.toString();
     const res = await q("SELECT id FROM users WHERE telegram_id=$1", [uid]);
@@ -350,6 +359,7 @@ bot.hears(/^\/رفع_اكواد/, async (ctx) => {
 });
 
 bot.hears(/رفع اكواد|رفع أكواد|رفع_اكواد|رفع/, async (ctx) => {
+  console.log("✅ Handler رفع alternative triggered");
   try {
     const uid = ctx.from.id.toString();
     const res = await q("SELECT id FROM users WHERE telegram_id=$1", [uid]);
