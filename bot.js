@@ -349,6 +349,21 @@ bot.hears(/^\/رفع_اكواد/, async (ctx) => {
   }
 });
 
+bot.hears(/رفع اكواد|رفع أكواد|رفع_اكواد|رفع/, async (ctx) => {
+  try {
+    const uid = ctx.from.id.toString();
+    const res = await q("SELECT id FROM users WHERE telegram_id=$1", [uid]);
+    if (res.rowCount === 0) {
+      return safeReply(ctx, "سجل أولًا باستخدام /تسجيل");
+    }
+    userState[uid] = { stage: "awaiting_days" };
+    return safeReply(ctx, "كم عدد الأيام (عدد الأكواد) التي تريد رفعها؟ اكتب رقماً:");
+  } catch (err) {
+    console.error("❌ رفع start:", err.message);
+    return safeReply(ctx, "❌ حدث خطأ، حاول لاحقًا.");
+  }
+});
+
 bot.hears(/^\/اكواد_اليوم/, async (ctx) => {
   try {
     const uid = ctx.from.id.toString();
@@ -368,6 +383,29 @@ bot.hears(/^\/اكواد_اليوم/, async (ctx) => {
     }
   } catch (err) {
     console.error("❌ اكواد_اليوم:", err.message);
+    return safeReply(ctx, "❌ حدث خطأ، حاول لاحقًا.");
+  }
+});
+
+bot.hears(/اكواد اليوم|أكواد اليوم/, async (ctx) => {
+  try {
+    const uid = ctx.from.id.toString();
+    const u = await q("SELECT id FROM users WHERE telegram_id=$1", [uid]);
+    if (u.rowCount === 0) {
+      return safeReply(ctx, "سجل أولًا باستخدام /تسجيل");
+    }
+    const userId = u.rows[0].id;
+    const today = new Date().toISOString().slice(0, 10);
+    const res = await q(`SELECT a.id as a_id, c.code_text, a.used FROM code_view_assignments a JOIN codes c ON a.code_id=c.id WHERE a.assigned_to_user_id=$1 AND a.assigned_date=$2`, [userId, today]);
+    if (res.rowCount === 0) {
+      return safeReply(ctx, "لا يوجد أكواد اليوم.");
+    }
+    for (const row of res.rows) {
+      const used = row.used ? "✅ مستخدم" : "🔲 غير مستخدم";
+      await safeReply(ctx, `${row.code_text}\nالحالة: ${used}`);
+    }
+  } catch (err) {
+    console.error("❌ اكواد اليوم:", err.message);
     return safeReply(ctx, "❌ حدث خطأ، حاول لاحقًا.");
   }
 });
