@@ -133,6 +133,111 @@ bot.hears(/^\/تسجيل/, async (ctx) => {
   }
 });
 
+bot.on("contact", async (ctx) => {
+  try {
+    const contact = ctx.message.contact;
+    const tgId = ctx.from.id.toString();
+    const st = userState[tgId];
+    if (!st || st.stage !== "awaiting_phone") {
+      return safeReply(ctx, "ابدأ التسجيل بكتابة /تسجيل");
+    }
+
+    if (contact.user_id && contact.user_id.toString() !== tgId) {
+      delete userState[tgId];
+      return safeReply(ctx, "✋ يجب مشاركة رقم هاتفك الخاص فقط.");
+    }
+
+    const phone = contact.phone_number;
+    const dupPhone = await q("SELECT id FROM users WHERE phone=$1", [phone]);
+    const dupTelegram = await q("SELECT id FROM users WHERE telegram_id=$1", [tgId]);
+    let dupBinance = { rowCount: 0 };
+    if (st.binance) {
+      dupBinance = await q("SELECT id FROM users WHERE binance_id=$1", [st.binance]);
+    }
+    if (dupPhone.rowCount > 0 || dupTelegram.rowCount > 0 || dupBinance.rowCount > 0) {
+      delete userState[tgId];
+      return safeReply(ctx, "⚠️ لا يمكنك التسجيل أكثر من مرة");
+    }
+
+    const settings = await getSettings();
+    const groupId = await assignGroupIdBySettings(settings.group_size);
+    const autoName = await autoNameInGroup(groupId);
+
+    await q(`INSERT INTO users (telegram_id, binance_id, phone, auto_name, group_id, verified, created_at) VALUES ($1,$2,$3,$4,$5,true,NOW())`, [tgId, st.binance || null, phone, autoName, groupId]);
+    delete userState[tgId];
+    return safeReply(ctx, `✅ تم التسجيل بنجاح!\nالمجموعة: ${groupId}\nاسمك التلقائي: ${autoName}`, mainKeyboard(ctx.from.id));
+  } catch (err) {
+    console.error("❌ contact handler:", err.message);
+    return safeReply(ctx, "❌ حدث خطأ داخلي أثناء التسجيل.");
+  }
+});
+
+bot.command("admin", async (ctx) => {
+  if (ctx.from.id.toString() !== ADMIN_ID) {
+    return safeReply(ctx, "❌ مخصص للأدمن فقط.");
+  }
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback("📴 Toggle Scheduler", "toggle_scheduler")],
+    [Markup.button.callback("⏰ Set Send Time", "set_time")],
+    [Markup.button.callback("👁️ Set Daily Limit", "set_limit")],
+    [Markup.button.callback("📅 Set Days", "set_days")],
+    [Markup.button.callback("👥 Set Group Size", "set_group")],
+    [Markup.button.callback("📢 Broadcast", "broadcast")],
+    [Markup.button.callback("📊 Stats", "stats")],
+  ]);
+  return safeReply(ctx, "🔐 Admin Panel:", keyboard);
+});
+
+bot.hears(/^\/reset_cycle/, async (ctx) => {
+  if (ctx.from.id.toString() !== ADMIN_ID) return;
+  try {
+    await q("DELETE FROM code_view_assignments");
+    await q("DELETE FROM codes");
+    return safeReply(ctx, "🔄 تم بدء دورة جديدة!");
+  } catch (err) {
+    console.error(err);
+    return safeReply(ctx, "❌ حدث خطأ.");
+  }
+});
+
+bot.hears(/^\/set_time/, async (ctx) => {
+  if (ctx.from.id.toString() !== ADMIN_ID) return;
+  const time = ctx.message.text.split(" ")[1];
+  if (!/^\d{2}:\d{2}$/.test(time)) return safeReply(ctx, "❌ Invalid format. Example: /set_time 09:00");
+  await updateSettings("send_time", time);
+  return safeReply(ctx, `✅ Send time set to ${time}`);
+});
+
+bot.hears(/^\/set_limit/, async (ctx) => {
+  if (ctx.from.id.toString() !== ADMIN_ID) return;
+  const val = parseInt(ctx.message.text.split(" ")[1], 10);
+  if (isNaN(val)) return safeReply(ctx, "❌ Invalid number");
+  await updateSettings("daily_codes_limit", val);
+  return safeReply(ctx, `✅ Daily limit set to ${val}`);
+});
+
+bot.hears(/^\/set_days/, async (ctx) => {
+  if (ctx.from.id.toString() !== ADMIN_ID) return;
+  const val = parseInt(ctx.message.text.split(" ")[1], 10);
+  if (isNaN(val)) return safeReply(ctx, "❌ Invalid number");
+  await updateSettings("distribution_days", val);
+  return safeReply(ctx, `✅ Distribution days set to ${val}`);
+});
+
+bot.hears(/^\/set_group/, async (ctx) => {
+  if (ctx.from.id.toString() !== ADMIN_ID) return;
+  const val = parseInt(ctx.message.text.split(" ")[1], 10);
+  if (isNaN(val)) return safeReply(ctx, "❌ Invalid number");
+  await updateSettings("group_size", val);
+  try {
+    await q("UPDATE groups SET max_users = $1", [val]);
+  } catch (err) {
+    console.error("❌ Failed to update groups.max_users");
+  }
+  return safeReply(ctx, `✅ Group size set to ${val}`);
+});
+
+
 bot.on("text", async (ctx) => {
   const uid = ctx.from.id.toString();
 
@@ -226,45 +331,6 @@ bot.on("text", async (ctx) => {
 
     st.codes.push(text);
     return safeReply(ctx, `استلمت الكود رقم ${st.codes.length}.`);
-  }
-});
-
-bot.on("contact", async (ctx) => {
-  try {
-    const contact = ctx.message.contact;
-    const tgId = ctx.from.id.toString();
-    const st = userState[tgId];
-    if (!st || st.stage !== "awaiting_phone") {
-      return safeReply(ctx, "ابدأ التسجيل بكتابة /تسجيل");
-    }
-
-    if (contact.user_id && contact.user_id.toString() !== tgId) {
-      delete userState[tgId];
-      return safeReply(ctx, "✋ يجب مشاركة رقم هاتفك الخاص فقط.");
-    }
-
-    const phone = contact.phone_number;
-    const dupPhone = await q("SELECT id FROM users WHERE phone=$1", [phone]);
-    const dupTelegram = await q("SELECT id FROM users WHERE telegram_id=$1", [tgId]);
-    let dupBinance = { rowCount: 0 };
-    if (st.binance) {
-      dupBinance = await q("SELECT id FROM users WHERE binance_id=$1", [st.binance]);
-    }
-    if (dupPhone.rowCount > 0 || dupTelegram.rowCount > 0 || dupBinance.rowCount > 0) {
-      delete userState[tgId];
-      return safeReply(ctx, "⚠️ لا يمكنك التسجيل أكثر من مرة");
-    }
-
-    const settings = await getSettings();
-    const groupId = await assignGroupIdBySettings(settings.group_size);
-    const autoName = await autoNameInGroup(groupId);
-
-    await q(`INSERT INTO users (telegram_id, binance_id, phone, auto_name, group_id, verified, created_at) VALUES ($1,$2,$3,$4,$5,true,NOW())`, [tgId, st.binance || null, phone, autoName, groupId]);
-    delete userState[tgId];
-    return safeReply(ctx, `✅ تم التسجيل بنجاح!\nالمجموعة: ${groupId}\nاسمك التلقائي: ${autoName}`, mainKeyboard(ctx.from.id));
-  } catch (err) {
-    console.error("❌ contact handler:", err.message);
-    return safeReply(ctx, "❌ حدث خطأ داخلي أثناء التسجيل.");
   }
 });
 
@@ -548,5 +614,20 @@ if (RENDER_URL) {
   })();
 }
 
-process.once("SIGINT", () => bot.stop("SIGINT"));
-process.once("SIGTERM", () => bot.stop("SIGTERM"));
+process.once("SIGINT", () => {
+  try {
+    bot.stop("SIGINT");
+  } catch (e) {
+    console.log("Stopping...");
+    process.exit(0);
+  }
+});
+
+process.once("SIGTERM", () => {
+  try {
+    bot.stop("SIGTERM");
+  } catch (e) {
+    console.log("Stopping...");
+    process.exit(0);
+  }
+});
