@@ -243,6 +243,67 @@ bot.on("text", async (ctx) => {
   const text = ctx.message.text;
   console.log(`📝 Text received from ${uid}: "${text}"`);
 
+  // Check for commands first
+  if (text === "/رفع_اكواد" || text.includes("رفع") && text.includes("اكواد")) {
+    console.log("✅ رفع_اكواد command detected");
+    try {
+      const res = await q("SELECT id FROM users WHERE telegram_id=$1", [uid]);
+      if (res.rowCount === 0) {
+        return safeReply(ctx, "سجل أولًا باستخدام /تسجيل");
+      }
+      userState[uid] = { stage: "awaiting_days" };
+      return safeReply(ctx, "كم عدد الأيام (عدد الأكواد) التي تريد رفعها؟ اكتب رقماً:");
+    } catch (err) {
+      console.error("❌ رفع_اكواد:", err.message);
+      return safeReply(ctx, "❌ حدث خطأ، حاول لاحقًا.");
+    }
+  }
+
+  if (text === "/اكواد_اليوم" || (text.includes("اكواد") && text.includes("اليوم"))) {
+    console.log("✅ اكواد_اليوم command detected");
+    try {
+      const u = await q("SELECT id FROM users WHERE telegram_id=$1", [uid]);
+      if (u.rowCount === 0) {
+        return safeReply(ctx, "سجل أولًا باستخدام /تسجيل");
+      }
+      const userId = u.rows[0].id;
+      const today = new Date().toISOString().slice(0, 10);
+      const res = await q(`SELECT a.id as a_id, c.code_text, a.used FROM code_view_assignments a JOIN codes c ON a.code_id=c.id WHERE a.assigned_to_user_id=$1 AND a.assigned_date=$2`, [userId, today]);
+      if (res.rowCount === 0) {
+        return safeReply(ctx, "لا يوجد أكواد اليوم.");
+      }
+      for (const row of res.rows) {
+        const used = row.used ? "✅ مستخدم" : "🔲 غير مستخدم";
+        await safeReply(ctx, `${row.code_text}\nالحالة: ${used}`);
+      }
+      return;
+    } catch (err) {
+      console.error("❌ اكواد_اليوم:", err.message);
+      return safeReply(ctx, "❌ حدث خطأ، حاول لاحقًا.");
+    }
+  }
+
+  if (text === "/اكوادى" || text.includes("اكوادى")) {
+    console.log("✅ اكوادى command detected");
+    try {
+      const res = await q("SELECT id FROM users WHERE telegram_id=$1", [uid]);
+      if (res.rowCount === 0) {
+        return safeReply(ctx, "سجل أولًا باستخدام /تسجيل");
+      }
+      const userId = res.rows[0].id;
+      const codes = await q("SELECT code_text, status FROM codes WHERE owner_id=$1 ORDER BY created_at DESC", [userId]);
+      if (codes.rowCount === 0) {
+        return safeReply(ctx, "❌ لا توجد لديك أكواد.");
+      }
+      const list = codes.rows.map((c, i) => `${i + 1}. ${c.code_text} (${c.status || 'active'})`).join("\n");
+      return safeReply(ctx, `📋 أكوادك:\n${list}`);
+    } catch (err) {
+      console.error("❌ اكوادى:", err.message);
+      return safeReply(ctx, "❌ حدث خطأ، حاول لاحقًا.");
+    }
+  }
+
+  // Broadcast mode
   if (uid === ADMIN_ID && adminBroadcastMode) {
     adminBroadcastMode = false;
     const message = ctx.message.text;
