@@ -508,10 +508,13 @@ bot.hears(/^\/set_group/, async (ctx) => {
 bot.hears(/^\/set_max_groups/, async (ctx) => {
   if (ctx.from.id.toString() !== ADMIN_ID) return;
   const input = ctx.message.text.split(" ")[1];
-  const val = input === "NULL" ? null : parseInt(input, 10);
-  if (input !== "NULL" && isNaN(val)) return safeReply(ctx, "❌ Invalid number");
+  if (!input) return safeReply(ctx, "❌ Usage: /set_max_groups 15 (or NULL for unlimited)");
+  
+  const val = input.toUpperCase() === "NULL" ? null : parseInt(input, 10);
+  if (input.toUpperCase() !== "NULL" && isNaN(val)) return safeReply(ctx, "❌ Invalid number");
+  
   await updateAdminSettings("max_groups", val);
-  return safeReply(ctx, `✅ Max groups set to ${val || 'Unlimited'}`);
+  return safeReply(ctx, `✅ Max groups set to ${val === null ? 'Unlimited' : val}`);
 });
 
 bot.hears(/^\/reset_cycle/, async (ctx) => {
