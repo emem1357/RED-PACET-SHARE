@@ -552,15 +552,21 @@ async function runDailyDistribution() {
       for (const c of codesRes.rows) {
         const viewersNeeded = c.views_per_day || groupSettings.daily_codes_limit;
         
+        // ✅ استبعاد صاحب الكود
         let candidates = allUserIds.filter(uid => uid !== c.owner_id);
         
-        const alreadySeenCode = await q(
-          `SELECT assigned_to_user_id FROM code_view_assignments WHERE code_id=$1`,
-          [c.id]
+        // ✅ استبعاد من رأى أي كود من نفس المالك (owner)
+        const alreadySeenOwnerCodes = await q(
+          `SELECT DISTINCT a.assigned_to_user_id 
+           FROM code_view_assignments a 
+           JOIN codes cc ON a.code_id = cc.id 
+           WHERE cc.owner_id=$1`,
+          [c.owner_id]
         );
-        const seenUserIds = alreadySeenCode.rows.map(r => r.assigned_to_user_id);
+        const seenUserIds = alreadySeenOwnerCodes.rows.map(r => r.assigned_to_user_id);
         candidates = candidates.filter(uid => !seenUserIds.includes(uid));
         
+        // ترتيب عشوائي
         candidates = candidates.sort(() => 0.5 - Math.random());
 
         let assignedCount = 0;
@@ -578,7 +584,7 @@ async function runDailyDistribution() {
             console.error("❌ Failed assignment:", err.message);
           }
         }
-        console.log(`🔸 Group ${group.id} - Code ${c.id} distributed to ${assignedCount}/${viewersNeeded}`);
+        console.log(`🔸 Group ${group.id} - Code ${c.id} distributed to ${assignedCount}/${viewersNeeded} new users`);
       }
     }
     console.log(`✅ Distribution complete`);
