@@ -228,6 +228,64 @@ bot.command("admin", async (ctx) => {
   return safeReply(ctx, "🔐 Admin Panel (Global Settings):", keyboard);
 });
 
+bot.hears(/^\/set_time/, async (ctx) => {
+  if (ctx.from.id.toString() !== ADMIN_ID) return;
+  const time = ctx.message.text.split(" ")[1];
+  if (!/^\d{2}:\d{2}$/.test(time)) return safeReply(ctx, "❌ Invalid format. Example: /set_time 09:00");
+  await updateAdminSettings("send_time", time);
+  return safeReply(ctx, `✅ Send time set to ${time}`);
+});
+
+bot.hears(/^\/set_limit/, async (ctx) => {
+  if (ctx.from.id.toString() !== ADMIN_ID) return;
+  const val = parseInt(ctx.message.text.split(" ")[1], 10);
+  if (isNaN(val)) return safeReply(ctx, "❌ Invalid number");
+  await updateAdminSettings("daily_codes_limit", val);
+  return safeReply(ctx, `✅ Daily limit set to ${val}`);
+});
+
+bot.hears(/^\/set_days/, async (ctx) => {
+  if (ctx.from.id.toString() !== ADMIN_ID) return;
+  const val = parseInt(ctx.message.text.split(" ")[1], 10);
+  if (isNaN(val)) return safeReply(ctx, "❌ Invalid number");
+  await updateAdminSettings("distribution_days", val);
+  return safeReply(ctx, `✅ Distribution days set to ${val}`);
+});
+
+bot.hears(/^\/set_group/, async (ctx) => {
+  if (ctx.from.id.toString() !== ADMIN_ID) return;
+  const val = parseInt(ctx.message.text.split(" ")[1], 10);
+  if (isNaN(val)) return safeReply(ctx, "❌ Invalid number");
+  await updateAdminSettings("group_size", val);
+  await q("UPDATE groups SET max_users = $1", [val]);
+  return safeReply(ctx, `✅ Group size set to ${val}`);
+});
+
+bot.hears(/^\/set_max_groups/, async (ctx) => {
+  if (ctx.from.id.toString() !== ADMIN_ID) return;
+  const input = ctx.message.text.split(" ")[1];
+  if (!input) return safeReply(ctx, "❌ Usage: /set_max_groups 15 (or NULL for unlimited)");
+  
+  const val = input.toUpperCase() === "NULL" ? null : parseInt(input, 10);
+  if (input.toUpperCase() !== "NULL" && isNaN(val)) return safeReply(ctx, "❌ Invalid number");
+  
+  await updateAdminSettings("max_groups", val);
+  return safeReply(ctx, `✅ Max groups set to ${val === null ? 'Unlimited' : val}`);
+});
+
+bot.hears(/^\/reset_cycle/, async (ctx) => {
+  if (ctx.from.id.toString() !== ADMIN_ID) return;
+  try {
+    await q("DELETE FROM code_view_assignments");
+    await q("DELETE FROM codes");
+    await q("DELETE FROM user_penalties");
+    return safeReply(ctx, "🔄 تم بدء دورة جديدة!");
+  } catch (err) {
+    console.error(err);
+    return safeReply(ctx, "❌ حدث خطأ.");
+  }
+});
+
 bot.on("text", async (ctx) => {
   const uid = ctx.from.id.toString();
   const text = ctx.message.text;
@@ -401,6 +459,76 @@ bot.on("text", async (ctx) => {
 
 bot.on("callback_query", async (ctx) => {
   const action = ctx.callbackQuery.data;
+
+  if (action.startsWith("copy_")) {
+    const assignmentId = action.replace("copy_", "");
+    try {
+      const res = await q("SELECT c.code_text FROM code_view_assignments a JOIN codes c ON a.code_id=c.id WHERE a.id=$1", [assignmentId]);
+      if (res.rowCount > 0) {
+        await ctx.answerCbQuery(`تم نسخ: ${res.rows[0].code_text}`, { show_alert: false });
+      }
+    } catch (err) {
+      await ctx.answerCbQuery("❌ خطأ");
+    }
+    return;
+  }
+
+  if (action.startsWith("done_")) {
+    const assignmentId = action.replace("done_", "");
+    try {
+      await q("UPDATE code_view_assignments SET used=true, last_interaction_date=CURRENT_DATE WHERE id=$1", [assignmentId]);
+      
+      const uid = ctx.from.id.toString();
+      const u = await q("SELECT id FROM users WHERE telegram_id=$1", [uid]);
+      if (u.rowCount > 0) {
+        const userId = u.rows[0].id;
+        await q("DELETE FROM user_penalties WHERE user_id=$1", [userId]);
+      }
+
+      await ctx.answerCbQuery("✅ تم تسجيل الاستخدام");
+      await safeReply(ctx, "✅ رائع! تم تسجيل استخدام الكود.\n\nاكتب /اكواد_اليوم لعرض الكود التالي.");
+    } catch (err) {
+      console.error("❌ done callback:", err.message);
+      await ctx.answerCbQuery("❌ خطأ");
+    }
+    return;
+  }
+
+  if (ctx.from.id.toString() !== ADMIN_ID) {
+    return ctx.answerCbQuery("❌ Not allowed");
+  }
+
+  try {
+    if (action === "toggle_scheduler") {
+      const s = await getAdminSettings();
+      await updateAdminSettings("is_scheduler_active", !s.is_scheduler_active);
+      await safeReply(ctx, `✅ Scheduler: ${!s.is_scheduler_active ? "Enabled" : "Disabled"}`);
+    } else if (action === "set_time") {
+      await safeReply(ctx, "⏰ Send: /set_time 09:00");
+    } else if (action === "set_limit") {
+      await safeReply(ctx, "👁️ Send: /set_limit 50");
+    } else if (action === "set_days") {
+      await safeReply(ctx, "📅 Send: /set_days 20");
+    } else if (action === "set_group") {
+      await safeReply(ctx, "👥 Send: /set_group 1000");
+    } else if (action === "set_max_groups") {
+      await safeReply(ctx, "🔢 Send: /set_max_groups 10 (or NULL for unlimited)");
+    } else if (action === "broadcast") {
+      adminBroadcastMode = true;
+      await safeReply(ctx, "📢 Send message to broadcast:");
+    } else if (action === "stats") {
+      const u = await q(`SELECT COUNT(*) FROM users`);
+      const c = await q(`SELECT COUNT(*) FROM codes WHERE status='active'`);
+      const g = await q(`SELECT COUNT(*) FROM groups`);
+      const s = await getAdminSettings();
+      await safeReply(ctx, `📊 Stats:\n\nUsers: ${u.rows[0].count}\nActive Codes: ${c.rows[0].count}\nGroups: ${g.rows[0].count}\nMax Groups: ${s.max_groups || 'Unlimited'}\nScheduler: ${s.is_scheduler_active ? "On" : "Off"}`);
+    }
+    await ctx.answerCbQuery();
+  } catch (err) {
+    console.error("❌ callback error:", err.message);
+    await ctx.answerCbQuery();
+  }
+});
 
   if (action.startsWith("copy_")) {
     const assignmentId = action.replace("copy_", "");
