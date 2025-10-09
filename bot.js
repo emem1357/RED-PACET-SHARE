@@ -241,7 +241,8 @@ bot.hears(/^\/set_limit/, async (ctx) => {
   const val = parseInt(ctx.message.text.split(" ")[1], 10);
   if (isNaN(val)) return safeReply(ctx, "❌ Invalid number");
   await updateAdminSettings("daily_codes_limit", val);
-  return safeReply(ctx, `✅ Daily limit set to ${val}`);
+  await q("UPDATE groups SET daily_codes_limit = $1", [val]);
+  return safeReply(ctx, `✅ Daily limit set to ${val} for all groups`);
 });
 
 bot.hears(/^\/set_days/, async (ctx) => {
@@ -249,7 +250,8 @@ bot.hears(/^\/set_days/, async (ctx) => {
   const val = parseInt(ctx.message.text.split(" ")[1], 10);
   if (isNaN(val)) return safeReply(ctx, "❌ Invalid number");
   await updateAdminSettings("distribution_days", val);
-  return safeReply(ctx, `✅ Distribution days set to ${val}`);
+  await q("UPDATE groups SET distribution_days = $1", [val]);
+  return safeReply(ctx, `✅ Distribution days set to ${val} for all groups`);
 });
 
 bot.hears(/^\/set_group/, async (ctx) => {
