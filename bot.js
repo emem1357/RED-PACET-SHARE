@@ -83,12 +83,6 @@ async function updateAdminSettings(field, value) {
   await q(`UPDATE admin_settings SET ${field}=$1 WHERE id=1`, [value]);
 }
 
-async function updateGroupSettings(groupId, field, value) {
-  const allowedFields = ["daily_codes_limit", "distribution_days", "send_time", "is_scheduler_active"];
-  if (!allowedFields.includes(field)) throw new Error("Invalid field");
-  await q(`UPDATE groups SET ${field}=$1 WHERE id=$2`, [value, groupId]);
-}
-
 const userState = {};
 let lastRunDate = null;
 let adminBroadcastMode = false;
@@ -110,10 +104,11 @@ async function assignGroupIdBySettings(groupSize) {
     );
     if (res.rowCount > 0) return res.rows[0].id;
     
+    const adminSet = await getAdminSettings();
     const insert = await q(
       `INSERT INTO groups (name, max_users, created_at, daily_codes_limit, distribution_days, send_time, is_scheduler_active) 
-       VALUES ($1, $2, NOW(), 50, 20, '09:00:00', false) RETURNING id`,
-      [`Group-${Date.now()}`, groupSize]
+       VALUES ($1, $2, NOW(), $3, $4, $5, false) RETURNING id`,
+      [`Group-${Date.now()}`, groupSize, adminSet.daily_codes_limit, adminSet.distribution_days, adminSet.send_time]
     );
     return insert.rows[0].id;
   } catch (err) {
@@ -233,7 +228,8 @@ bot.hears(/^\/set_time/, async (ctx) => {
   const time = ctx.message.text.split(" ")[1];
   if (!/^\d{2}:\d{2}$/.test(time)) return safeReply(ctx, "❌ Invalid format. Example: /set_time 09:00");
   await updateAdminSettings("send_time", time);
-  return safeReply(ctx, `✅ Send time set to ${time}`);
+  await q("UPDATE groups SET send_time = $1", [time]);
+  return safeReply(ctx, `✅ Send time set to ${time} for all groups`);
 });
 
 bot.hears(/^\/set_limit/, async (ctx) => {
@@ -504,7 +500,8 @@ bot.on("callback_query", async (ctx) => {
     if (action === "toggle_scheduler") {
       const s = await getAdminSettings();
       await updateAdminSettings("is_scheduler_active", !s.is_scheduler_active);
-      await safeReply(ctx, `✅ Scheduler: ${!s.is_scheduler_active ? "Enabled" : "Disabled"}`);
+      await q("UPDATE groups SET is_scheduler_active = $1", [!s.is_scheduler_active]);
+      await safeReply(ctx, `✅ Scheduler: ${!s.is_scheduler_active ? "Enabled" : "Disabled"} for all groups`);
     } else if (action === "set_time") {
       await safeReply(ctx, "⏰ Send: /set_time 09:00");
     } else if (action === "set_limit") {
@@ -532,64 +529,6 @@ bot.on("callback_query", async (ctx) => {
   }
 });
 
-bot.hears(/^\/set_time/, async (ctx) => {
-  if (ctx.from.id.toString() !== ADMIN_ID) return;
-  const time = ctx.message.text.split(" ")[1];
-  if (!/^\d{2}:\d{2}$/.test(time)) return safeReply(ctx, "❌ Invalid format. Example: /set_time 09:00");
-  await updateAdminSettings("send_time", time);
-  return safeReply(ctx, `✅ Send time set to ${time}`);
-});
-
-bot.hears(/^\/set_limit/, async (ctx) => {
-  if (ctx.from.id.toString() !== ADMIN_ID) return;
-  const val = parseInt(ctx.message.text.split(" ")[1], 10);
-  if (isNaN(val)) return safeReply(ctx, "❌ Invalid number");
-  await updateAdminSettings("daily_codes_limit", val);
-  return safeReply(ctx, `✅ Daily limit set to ${val}`);
-});
-
-bot.hears(/^\/set_days/, async (ctx) => {
-  if (ctx.from.id.toString() !== ADMIN_ID) return;
-  const val = parseInt(ctx.message.text.split(" ")[1], 10);
-  if (isNaN(val)) return safeReply(ctx, "❌ Invalid number");
-  await updateAdminSettings("distribution_days", val);
-  return safeReply(ctx, `✅ Distribution days set to ${val}`);
-});
-
-bot.hears(/^\/set_group/, async (ctx) => {
-  if (ctx.from.id.toString() !== ADMIN_ID) return;
-  const val = parseInt(ctx.message.text.split(" ")[1], 10);
-  if (isNaN(val)) return safeReply(ctx, "❌ Invalid number");
-  await updateAdminSettings("group_size", val);
-  await q("UPDATE groups SET max_users = $1", [val]);
-  return safeReply(ctx, `✅ Group size set to ${val}`);
-});
-
-bot.hears(/^\/set_max_groups/, async (ctx) => {
-  if (ctx.from.id.toString() !== ADMIN_ID) return;
-  const input = ctx.message.text.split(" ")[1];
-  if (!input) return safeReply(ctx, "❌ Usage: /set_max_groups 15 (or NULL for unlimited)");
-  
-  const val = input.toUpperCase() === "NULL" ? null : parseInt(input, 10);
-  if (input.toUpperCase() !== "NULL" && isNaN(val)) return safeReply(ctx, "❌ Invalid number");
-  
-  await updateAdminSettings("max_groups", val);
-  return safeReply(ctx, `✅ Max groups set to ${val === null ? 'Unlimited' : val}`);
-});
-
-bot.hears(/^\/reset_cycle/, async (ctx) => {
-  if (ctx.from.id.toString() !== ADMIN_ID) return;
-  try {
-    await q("DELETE FROM code_view_assignments");
-    await q("DELETE FROM codes");
-    await q("DELETE FROM user_penalties");
-    return safeReply(ctx, "🔄 تم بدء دورة جديدة!");
-  } catch (err) {
-    console.error(err);
-    return safeReply(ctx, "❌ حدث خطأ.");
-  }
-});
-
 async function runDailyDistribution() {
   console.log("📦 بدء توزيع الأكواد...");
   try {
@@ -612,10 +551,8 @@ async function runDailyDistribution() {
       for (const c of codesRes.rows) {
         const viewersNeeded = c.views_per_day || groupSettings.daily_codes_limit;
         
-        // ✅ استبعاد صاحب الكود
         let candidates = allUserIds.filter(uid => uid !== c.owner_id);
         
-        // ✅ استبعاد من رأى أي كود من نفس المالك (owner)
         const alreadySeenOwnerCodes = await q(
           `SELECT DISTINCT a.assigned_to_user_id 
            FROM code_view_assignments a 
@@ -626,7 +563,6 @@ async function runDailyDistribution() {
         const seenUserIds = alreadySeenOwnerCodes.rows.map(r => r.assigned_to_user_id);
         candidates = candidates.filter(uid => !seenUserIds.includes(uid));
         
-        // ترتيب عشوائي
         candidates = candidates.sort(() => 0.5 - Math.random());
 
         let assignedCount = 0;
@@ -659,7 +595,6 @@ async function handleUnusedCodes() {
     const yesterday = new Date();
     yesterday.setDate(yesterday.getDate() - 1);
     const yesterdayStr = yesterday.toISOString().slice(0, 10);
-
     const today = new Date().toISOString().slice(0, 10);
 
     const unusedYesterday = await q(
