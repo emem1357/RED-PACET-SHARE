@@ -1,4 +1,4 @@
-// bot.js - COMPLETE VERSION with per-group settings
+// bot.js - COMPLETE VERSION with per-group settings + UUID validation
 import { Telegraf, Markup } from "telegraf";
 import fs from "fs";
 import pkg from "pg";
@@ -30,14 +30,19 @@ const pool = new Pool({
 const ADMIN_ID = process.env.ADMIN_ID;
 
 async function q(sql, params) {
-  const client = await pool.connect();
-  try {
-    return await client.query(sql, params);
-  } catch (err) {
-    console.error("❌ DB Error:", err.message);
-    throw err;
-  } finally {
-    client.release();
+  let retries = 3;
+  while (retries > 0) {
+    const client = await pool.connect();
+    try {
+      return await client.query(sql, params);
+    } catch (err) {
+      console.error("❌ DB Error:", err.message);
+      retries--;
+      if (retries === 0) throw err;
+      await new Promise(r => setTimeout(r, 1000));
+    } finally {
+      client.release();
+    }
   }
 }
 
@@ -561,7 +566,7 @@ bot.on("callback_query", async (ctx) => {
         return;
       }
       const keyboard = groups.rows.map(g => [
-        Markup.button.callback(`${g.is_scheduler_active ? '✅' : '❌'} Group ${g.id}`, `group_${g.id}`)
+        Markup.button.callback(`${g.is_scheduler_active ? '✅' : '❌'} Group ${g.id.toString().slice(0, 8)}`, `group_${g.id}`)
       ]);
       keyboard.push([Markup.button.callback("◀️ Back", "back_to_main")]);
       await ctx.editMessageText("📦 Manage Groups (Click to toggle):", { reply_markup: { inline_keyboard: keyboard } });
@@ -570,19 +575,29 @@ bot.on("callback_query", async (ctx) => {
     }
     
     if (action.startsWith("group_")) {
-      const groupId = parseInt(action.replace("group_", ""));
+      const groupId = action.replace("group_", "");
+      
+      // التحقق من أن groupId هو UUID صحيح
+      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (!uuidRegex.test(groupId)) {
+        await ctx.answerCbQuery("❌ Invalid group ID - please refresh /admin");
+        return;
+      }
+      
       const g = await q(`SELECT is_scheduler_active FROM groups WHERE id=$1`, [groupId]);
       if (g.rowCount > 0) {
         const newStatus = !g.rows[0].is_scheduler_active;
         await q(`UPDATE groups SET is_scheduler_active=$1 WHERE id=$2`, [newStatus, groupId]);
-        await ctx.answerCbQuery(`Group ${groupId}: ${newStatus ? 'Enabled' : 'Disabled'}`);
+        await ctx.answerCbQuery(`Group ${groupId.slice(0, 8)}: ${newStatus ? 'Enabled' : 'Disabled'}`);
         
         const groups = await q(`SELECT id, name, is_scheduler_active FROM groups ORDER BY created_at`);
         const keyboard = groups.rows.map(gr => [
-          Markup.button.callback(`${gr.is_scheduler_active ? '✅' : '❌'} Group ${gr.id}`, `group_${gr.id}`)
+          Markup.button.callback(`${gr.is_scheduler_active ? '✅' : '❌'} Group ${gr.id.toString().slice(0, 8)}`, `group_${gr.id}`)
         ]);
         keyboard.push([Markup.button.callback("◀️ Back", "back_to_main")]);
         await ctx.editMessageText("📦 Manage Groups (Click to toggle):", { reply_markup: { inline_keyboard: keyboard } });
+      } else {
+        await ctx.answerCbQuery("❌ Group not found");
       }
       return;
     }
