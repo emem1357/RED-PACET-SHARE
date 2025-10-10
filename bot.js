@@ -212,6 +212,7 @@ bot.command("admin", async (ctx) => {
   }
   const keyboard = Markup.inlineKeyboard([
     [Markup.button.callback("📴 Toggle Scheduler", "toggle_scheduler")],
+    [Markup.button.callback("🔄 Distribute Now", "distribute_now")],
     [Markup.button.callback("⏰ Set Send Time", "set_time")],
     [Markup.button.callback("👁️ Set Daily Limit", "set_limit")],
     [Markup.button.callback("📅 Set Days", "set_days")],
@@ -284,6 +285,18 @@ bot.hears(/^\/reset_cycle/, async (ctx) => {
   }
 });
 
+bot.hears(/^\/distribute_now/, async (ctx) => {
+  if (ctx.from.id.toString() !== ADMIN_ID) return;
+  try {
+    console.log("🔄 Manual distribution started by admin");
+    await runDailyDistribution();
+    return safeReply(ctx, "✅ تم توزيع الأكواد يدوياً!\n\nتحقق من /اكواد_اليوم الآن.");
+  } catch (err) {
+    console.error(err);
+    return safeReply(ctx, "❌ حدث خطأ أثناء التوزيع.");
+  }
+});
+
 bot.on("text", async (ctx) => {
   const uid = ctx.from.id.toString();
   const text = ctx.message.text;
@@ -323,11 +336,19 @@ bot.on("text", async (ctx) => {
 
   if (text === "/اكواد_اليوم" || (text.includes("اكواد") && text.includes("اليوم"))) {
     try {
-      const u = await q("SELECT id FROM users WHERE telegram_id=$1", [uid]);
+      const u = await q("SELECT id, group_id FROM users WHERE telegram_id=$1", [uid]);
       if (u.rowCount === 0) {
         return safeReply(ctx, "سجل أولًا باستخدام /تسجيل");
       }
       const userId = u.rows[0].id;
+      const groupId = u.rows[0].group_id;
+      
+      // Check if scheduler is active for this group
+      const groupSettings = await getGroupSettings(groupId);
+      if (!groupSettings.is_scheduler_active) {
+        return safeReply(ctx, "⏸️ التوزيع متوقف حالياً من قبل الأدمن.\n\nسيتم استئناف التوزيع عند إعادة التفعيل.");
+      }
+      
       const today = new Date().toISOString().slice(0, 10);
       const res = await q(
         `SELECT a.id as a_id, c.code_text, a.used FROM code_view_assignments a 
@@ -502,6 +523,10 @@ bot.on("callback_query", async (ctx) => {
       await updateAdminSettings("is_scheduler_active", !s.is_scheduler_active);
       await q("UPDATE groups SET is_scheduler_active = $1", [!s.is_scheduler_active]);
       await safeReply(ctx, `✅ Scheduler: ${!s.is_scheduler_active ? "Enabled" : "Disabled"} for all groups`);
+    } else if (action === "distribute_now") {
+      console.log("🔄 Manual distribution started by admin from button");
+      await runDailyDistribution();
+      await safeReply(ctx, "✅ تم توزيع الأكواد يدوياً!\n\nتحقق من /اكواد_اليوم الآن.");
     } else if (action === "set_time") {
       await safeReply(ctx, "⏰ Send: /set_time 09:00");
     } else if (action === "set_limit") {
