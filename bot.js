@@ -211,17 +211,12 @@ bot.command("admin", async (ctx) => {
     return safeReply(ctx, "❌ مخصص للأدمن فقط.");
   }
   const keyboard = Markup.inlineKeyboard([
-    [Markup.button.callback("📴 Toggle Scheduler", "toggle_scheduler")],
-    [Markup.button.callback("🔄 Distribute Now", "distribute_now")],
-    [Markup.button.callback("⏰ Set Send Time", "set_time")],
-    [Markup.button.callback("👁️ Set Daily Limit", "set_limit")],
-    [Markup.button.callback("📅 Set Days", "set_days")],
-    [Markup.button.callback("👥 Set Group Size", "set_group")],
-    [Markup.button.callback("🔢 Set Max Groups", "set_max_groups")],
-    [Markup.button.callback("📢 Broadcast", "broadcast")],
+    [Markup.button.callback("🌐 Global Settings", "global_settings")],
+    [Markup.button.callback("📦 Manage Groups", "manage_groups")],
+    [Markup.button.callback("🗑️ Delete Cycle Now", "delete_cycle")],
     [Markup.button.callback("📊 Stats", "stats")],
   ]);
-  return safeReply(ctx, "🔐 Admin Panel (Global Settings):", keyboard);
+  return safeReply(ctx, "🔐 Admin Panel:", keyboard);
 });
 
 bot.hears(/^\/set_time/, async (ctx) => {
@@ -484,7 +479,9 @@ bot.on("callback_query", async (ctx) => {
     try {
       const res = await q("SELECT c.code_text FROM code_view_assignments a JOIN codes c ON a.code_id=c.id WHERE a.id=$1", [assignmentId]);
       if (res.rowCount > 0) {
-        await ctx.answerCbQuery(`تم نسخ: ${res.rows[0].code_text}`, { show_alert: false });
+        const codeText = res.rows[0].code_text;
+        await ctx.answerCbQuery(`الكود: ${codeText}`, { show_alert: true });
+        await safeReply(ctx, `📋 الكود:\n\`${codeText}\`\n\nانسخه واستخدمه، ثم اضغط "تم الاستخدام"`);
       }
     } catch (err) {
       await ctx.answerCbQuery("❌ خطأ");
@@ -502,10 +499,29 @@ bot.on("callback_query", async (ctx) => {
       if (u.rowCount > 0) {
         const userId = u.rows[0].id;
         await q("DELETE FROM user_penalties WHERE user_id=$1", [userId]);
+        
+        const today = new Date().toISOString().slice(0, 10);
+        const nextCode = await q(
+          `SELECT a.id as a_id, c.code_text FROM code_view_assignments a 
+           JOIN codes c ON a.code_id=c.id 
+           WHERE a.assigned_to_user_id=$1 AND a.assigned_date=$2 AND a.used=false
+           ORDER BY c.created_at LIMIT 1`,
+          [userId, today]
+        );
+        
+        if (nextCode.rowCount > 0) {
+          const row = nextCode.rows[0];
+          const keyboard = Markup.inlineKeyboard([
+            [Markup.button.callback("📋 نسخ الكود", `copy_${row.a_id}`)],
+            [Markup.button.callback("✅ تم الاستخدام", `done_${row.a_id}`)],
+          ]);
+          await ctx.answerCbQuery("✅ رائع! إليك الكود التالي");
+          await safeReply(ctx, `📦 الكود التالي:\n\n\`${row.code_text}\`\n\nاضغط "نسخ الكود" ثم استخدمه`, keyboard);
+        } else {
+          await ctx.answerCbQuery("🎉 تم إكمال كل الأكواد!");
+          await safeReply(ctx, "✅ تم إكمال جميع الأكواد اليوم! أحسنت 🎉");
+        }
       }
-
-      await ctx.answerCbQuery("✅ تم تسجيل الاستخدام");
-      await safeReply(ctx, "✅ رائع! تم تسجيل استخدام الكود.\n\nاكتب /اكواد_اليوم لعرض الكود التالي.");
     } catch (err) {
       console.error("❌ done callback:", err.message);
       await ctx.answerCbQuery("❌ خطأ");
@@ -518,17 +534,98 @@ bot.on("callback_query", async (ctx) => {
   }
 
   try {
-    if (action === "toggle_scheduler") {
+    if (action === "global_settings") {
+      const keyboard = Markup.inlineKeyboard([
+        [Markup.button.callback("📴 Toggle All Schedulers", "toggle_all_schedulers")],
+        [Markup.button.callback("🔄 Distribute Now (All)", "distribute_now")],
+        [Markup.button.callback("⏰ Set Send Time", "set_time")],
+        [Markup.button.callback("👁️ Set Daily Limit", "set_limit")],
+        [Markup.button.callback("📅 Set Days", "set_days")],
+        [Markup.button.callback("👥 Set Group Size", "set_group")],
+        [Markup.button.callback("🔢 Set Max Groups", "set_max_groups")],
+        [Markup.button.callback("📢 Broadcast", "broadcast")],
+        [Markup.button.callback("◀️ Back", "back_to_main")],
+      ]);
+      await ctx.editMessageText("🌐 Global Settings (Apply to all groups):", { reply_markup: keyboard.reply_markup });
+      await ctx.answerCbQuery();
+      return;
+    }
+    
+    if (action === "manage_groups") {
+      const groups = await q(`SELECT id, name, is_scheduler_active FROM groups ORDER BY created_at`);
+      if (groups.rowCount === 0) {
+        await ctx.answerCbQuery("لا توجد مجموعات");
+        return;
+      }
+      const keyboard = groups.rows.map(g => [
+        Markup.button.callback(`${g.is_scheduler_active ? '✅' : '❌'} Group ${g.id}`, `group_${g.id}`)
+      ]);
+      keyboard.push([Markup.button.callback("◀️ Back", "back_to_main")]);
+      await ctx.editMessageText("📦 Manage Groups (Click to toggle):", { reply_markup: { inline_keyboard: keyboard } });
+      await ctx.answerCbQuery();
+      return;
+    }
+    
+    if (action.startsWith("group_")) {
+      const groupId = parseInt(action.replace("group_", ""));
+      const g = await q(`SELECT is_scheduler_active FROM groups WHERE id=$1`, [groupId]);
+      if (g.rowCount > 0) {
+        const newStatus = !g.rows[0].is_scheduler_active;
+        await q(`UPDATE groups SET is_scheduler_active=$1 WHERE id=$2`, [newStatus, groupId]);
+        await ctx.answerCbQuery(`Group ${groupId}: ${newStatus ? 'Enabled' : 'Disabled'}`);
+        
+        const groups = await q(`SELECT id, name, is_scheduler_active FROM groups ORDER BY created_at`);
+        const keyboard = groups.rows.map(gr => [
+          Markup.button.callback(`${gr.is_scheduler_active ? '✅' : '❌'} Group ${gr.id}`, `group_${gr.id}`)
+        ]);
+        keyboard.push([Markup.button.callback("◀️ Back", "back_to_main")]);
+        await ctx.editMessageText("📦 Manage Groups (Click to toggle):", { reply_markup: { inline_keyboard: keyboard } });
+      }
+      return;
+    }
+    
+    if (action === "delete_cycle") {
+      const keyboard = Markup.inlineKeyboard([
+        [Markup.button.callback("⚠️ Confirm Delete", "confirm_delete_cycle")],
+        [Markup.button.callback("◀️ Cancel", "back_to_main")],
+      ]);
+      await ctx.editMessageText("⚠️ هل أنت متأكد من حذف كل الأكواد والتوزيعات؟", { reply_markup: keyboard.reply_markup });
+      await ctx.answerCbQuery();
+      return;
+    }
+    
+    if (action === "confirm_delete_cycle") {
+      await q("DELETE FROM code_view_assignments");
+      await q("DELETE FROM codes");
+      await q("DELETE FROM user_penalties");
+      await safeReply(ctx, "🗑️ تم حذف جميع الأكواد والتوزيعات!");
+      await ctx.answerCbQuery("✅ Deleted");
+      return;
+    }
+    
+    if (action === "back_to_main") {
+      const keyboard = Markup.inlineKeyboard([
+        [Markup.button.callback("🌐 Global Settings", "global_settings")],
+        [Markup.button.callback("📦 Manage Groups", "manage_groups")],
+        [Markup.button.callback("🗑️ Delete Cycle Now", "delete_cycle")],
+        [Markup.button.callback("📊 Stats", "stats")],
+      ]);
+      await ctx.editMessageText("🔐 Admin Panel:", { reply_markup: keyboard.reply_markup });
+      await ctx.answerCbQuery();
+      return;
+    }
+    
+    if (action === "toggle_all_schedulers") {
       const s = await getAdminSettings();
       await updateAdminSettings("is_scheduler_active", !s.is_scheduler_active);
       await q("UPDATE groups SET is_scheduler_active = $1", [!s.is_scheduler_active]);
-      await safeReply(ctx, `✅ Scheduler: ${!s.is_scheduler_active ? "Enabled" : "Disabled"} for all groups`);
+      await safeReply(ctx, `✅ All Schedulers: ${!s.is_scheduler_active ? "Enabled" : "Disabled"}`);
     } else if (action === "distribute_now") {
-      console.log("🔄 Manual distribution started by admin from button");
+      console.log("🔄 Manual distribution started");
       await runDailyDistribution();
-      await safeReply(ctx, "✅ تم توزيع الأكواد يدوياً!\n\nتحقق من /اكواد_اليوم الآن.");
+      await safeReply(ctx, "✅ تم توزيع الأكواد يدوياً!");
     } else if (action === "set_time") {
-      await safeReply(ctx, "⏰ Send: /set_time 09:00");
+      await safeReply(ctx, "⏰ Send: /set_time 21:00");
     } else if (action === "set_limit") {
       await safeReply(ctx, "👁️ Send: /set_limit 50");
     } else if (action === "set_days") {
@@ -536,7 +633,7 @@ bot.on("callback_query", async (ctx) => {
     } else if (action === "set_group") {
       await safeReply(ctx, "👥 Send: /set_group 1000");
     } else if (action === "set_max_groups") {
-      await safeReply(ctx, "🔢 Send: /set_max_groups 10 (or NULL for unlimited)");
+      await safeReply(ctx, "🔢 Send: /set_max_groups 10 (or NULL)");
     } else if (action === "broadcast") {
       adminBroadcastMode = true;
       await safeReply(ctx, "📢 Send message to broadcast:");
@@ -565,7 +662,7 @@ async function runDailyDistribution() {
         `SELECT c.id, c.owner_id, c.views_per_day FROM codes c 
          JOIN users u ON c.owner_id=u.id 
          WHERE c.status='active' AND u.group_id=$1 
-         ORDER BY c.created_at ASC`,
+         ORDER BY c.id ASC`,
         [group.id]
       );
 
@@ -755,13 +852,25 @@ cron.schedule("0 0 1 * *", async () => {
   }
 });
 
-cron.schedule("0 9 * * *", async () => {
+cron.schedule("* * * * *", async () => {
   try {
-    console.log("🌅 Morning tasks...");
-    await runDailyDistribution();
-    await handleUnusedCodes();
+    const groups = await q(`SELECT id, send_time, is_scheduler_active FROM groups WHERE is_scheduler_active=true`);
+    const now = new Date();
+    const currentHour = now.getHours();
+    const currentMinute = now.getMinutes();
+    
+    for (const group of groups.rows) {
+      const [targetHour, targetMinute] = group.send_time.split(':').map(Number);
+      
+      if (currentHour === targetHour && currentMinute === targetMinute) {
+        console.log(`🌅 Running distribution for group ${group.id} at ${group.send_time}`);
+        await runDailyDistribution();
+        await handleUnusedCodes();
+        break;
+      }
+    }
   } catch (err) {
-    console.error("❌ Morning tasks error:", err);
+    console.error("❌ Scheduler error:", err);
   }
 });
 
