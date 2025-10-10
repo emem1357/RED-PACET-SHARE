@@ -22,6 +22,9 @@ try {
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ...(sslConfig ? { ssl: sslConfig } : {}),
+  max: 20,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 10000,
 });
 
 const ADMIN_ID = process.env.ADMIN_ID;
