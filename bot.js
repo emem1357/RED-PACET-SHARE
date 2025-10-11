@@ -377,6 +377,72 @@ bot.on("text", async (ctx) => {
   const uid = ctx.from.id.toString();
   const text = ctx.message.text;
 
+  // أوامر الأدمن للمجموعات - يجب أن تكون أولاً
+  if (uid === ADMIN_ID) {
+    if (text.startsWith("/set_group_days ")) {
+      const parts = text.split(" ");
+      if (parts.length < 3) return safeReply(ctx, "❌ Usage: /set_group_days <group_id_prefix> <days>");
+      
+      const groupPrefix = parts[1];
+      const val = parseInt(parts[2], 10);
+      if (isNaN(val)) return safeReply(ctx, "❌ Invalid number");
+      
+      try {
+        const groups = await q(`SELECT id FROM groups WHERE id::text LIKE $1`, [`${groupPrefix}%`]);
+        if (groups.rowCount === 0) return safeReply(ctx, "❌ Group not found");
+        
+        const groupId = groups.rows[0].id;
+        await updateGroupSettings(groupId, 'distribution_days', val);
+        return safeReply(ctx, `✅ Distribution days set to ${val} days for group ${groupId.slice(0, 8)}`);
+      } catch (err) {
+        console.error(err);
+        return safeReply(ctx, "❌ Error updating group");
+      }
+    }
+
+    if (text.startsWith("/set_group_limit ")) {
+      const parts = text.split(" ");
+      if (parts.length < 3) return safeReply(ctx, "❌ Usage: /set_group_limit <group_id_prefix> <limit>");
+      
+      const groupPrefix = parts[1];
+      const val = parseInt(parts[2], 10);
+      if (isNaN(val)) return safeReply(ctx, "❌ Invalid number");
+      
+      try {
+        const groups = await q(`SELECT id FROM groups WHERE id::text LIKE $1`, [`${groupPrefix}%`]);
+        if (groups.rowCount === 0) return safeReply(ctx, "❌ Group not found");
+        
+        const groupId = groups.rows[0].id;
+        await updateGroupSettings(groupId, 'daily_codes_limit', val);
+        return safeReply(ctx, `✅ Daily codes limit set to ${val} views per code for group ${groupId.slice(0, 8)}`);
+      } catch (err) {
+        console.error(err);
+        return safeReply(ctx, "❌ Error updating group");
+      }
+    }
+
+    if (text.startsWith("/set_group_time ")) {
+      const parts = text.split(" ");
+      if (parts.length < 3) return safeReply(ctx, "❌ Usage: /set_group_time <group_id_prefix> 09:00");
+      
+      const groupPrefix = parts[1];
+      const time = parts[2];
+      if (!/^\d{2}:\d{2}$/.test(time)) return safeReply(ctx, "❌ Invalid format. Example: 09:00");
+      
+      try {
+        const groups = await q(`SELECT id FROM groups WHERE id::text LIKE $1`, [`${groupPrefix}%`]);
+        if (groups.rowCount === 0) return safeReply(ctx, "❌ Group not found");
+        
+        const groupId = groups.rows[0].id;
+        await updateGroupSettings(groupId, 'send_time', time);
+        return safeReply(ctx, `✅ Send time set to ${time} for group ${groupId.slice(0, 8)}`);
+      } catch (err) {
+        console.error(err);
+        return safeReply(ctx, "❌ Error updating group");
+      }
+    }
+  }
+
   if (text === "/رفع_اكواد" || (text.includes("رفع") && text.includes("اكواد"))) {
     try {
       const userRes = await q("SELECT id, group_id FROM users WHERE telegram_id=$1", [uid]);
