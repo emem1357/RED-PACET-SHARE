@@ -446,7 +446,7 @@ bot.on("text", async (ctx) => {
         [Markup.button.callback("✅ تم الاستخدام", `done_${row.a_id}`)],
       ]);
 
-      return safeReply(ctx, `📦 كود اليوم:\n\n\`${row.code_text}\`\n\n💡 اضغط على الكود لنسخه، ثم استخدمه\nبعد ذلك اضغط "تم الاستخدام"`, keyboard);
+      return safeReply(ctx, `📦 كود اليوم:\n\n<code>${row.code_text}</code>\n\n💡 اضغط على الكود لنسخه، ثم استخدمه\nبعد ذلك اضغط "تم الاستخدام"`, { ...keyboard, parse_mode: 'HTML' });
     } catch (err) {
       console.error("❌ اكواد_اليوم:", err.message);
       return safeReply(ctx, "❌ حدث خطأ، حاول لاحقًا.");
@@ -606,7 +606,7 @@ bot.on("callback_query", async (ctx) => {
             [Markup.button.callback("✅ تم الاستخدام", `done_${row.a_id}`)],
           ]);
           await ctx.answerCbQuery("✅ رائع! إليك الكود التالي");
-          await safeReply(ctx, `📦 الكود التالي:\n\n\`${row.code_text}\`\n\n💡 اضغط على الكود لنسخه`, keyboard);
+          await safeReply(ctx, `📦 الكود التالي:\n\n<code>${row.code_text}</code>\n\n💡 اضغط على الكود لنسخه`, { ...keyboard, parse_mode: 'HTML' });
         } else {
           await ctx.answerCbQuery("🎉 تم إكمال كل الأكواد!");
           await safeReply(ctx, "✅ تم إكمال جميع الأكواد اليوم! أحسنت 🎉");
@@ -812,7 +812,7 @@ bot.on("callback_query", async (ctx) => {
     } else if (action === "set_days") {
       await safeReply(ctx, "📅 Send: /set_days 20");
     } else if (action === "set_group") {
-      await safeReply(ctx, "👥 Send: /set_group 1000");
+      await safeReply(ctx, "👥 Send: /set_group_size 1000");
     } else if (action === "set_max_groups") {
       await safeReply(ctx, "🔢 Send: /set_max_groups 10 (or NULL)");
     } else if (action === "broadcast") {
