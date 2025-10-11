@@ -1,4 +1,4 @@
-// bot.js - COMPLETE VERSION with per-group settings + UUID validation
+// bot.js - COMPLETE VERSION with enhanced per-group management
 import { Telegraf, Markup } from "telegraf";
 import fs from "fs";
 import pkg from "pg";
@@ -91,9 +91,16 @@ async function updateAdminSettings(field, value) {
   await q(`UPDATE admin_settings SET ${field}=$1 WHERE id=1`, [value]);
 }
 
+async function updateGroupSettings(groupId, field, value) {
+  const allowedFields = ["daily_codes_limit", "distribution_days", "send_time", "is_scheduler_active"];
+  if (!allowedFields.includes(field)) throw new Error("Invalid field");
+  await q(`UPDATE groups SET ${field}=$1 WHERE id=$2`, [value, groupId]);
+}
+
 const userState = {};
 let lastRunDate = null;
 let adminBroadcastMode = false;
+let groupBroadcastMode = {};
 
 async function assignGroupIdBySettings(groupSize) {
   try {
@@ -300,6 +307,72 @@ bot.hears(/^\/distribute_now/, async (ctx) => {
   }
 });
 
+bot.hears(/^\/set_group_days/, async (ctx) => {
+  if (ctx.from.id.toString() !== ADMIN_ID) return;
+  const parts = ctx.message.text.split(" ");
+  if (parts.length < 3) return safeReply(ctx, "❌ Usage: /set_group_days <group_id_prefix> <days>");
+  
+  const groupPrefix = parts[1];
+  const val = parseInt(parts[2], 10);
+  if (isNaN(val)) return safeReply(ctx, "❌ Invalid number");
+  
+  try {
+    const groups = await q(`SELECT id FROM groups WHERE id::text LIKE $1`, [`${groupPrefix}%`]);
+    if (groups.rowCount === 0) return safeReply(ctx, "❌ Group not found");
+    
+    const groupId = groups.rows[0].id;
+    await updateGroupSettings(groupId, 'distribution_days', val);
+    return safeReply(ctx, `✅ Distribution days set to ${val} for group ${groupId.slice(0, 8)}`);
+  } catch (err) {
+    console.error(err);
+    return safeReply(ctx, "❌ Error updating group");
+  }
+});
+
+bot.hears(/^\/set_group_limit/, async (ctx) => {
+  if (ctx.from.id.toString() !== ADMIN_ID) return;
+  const parts = ctx.message.text.split(" ");
+  if (parts.length < 3) return safeReply(ctx, "❌ Usage: /set_group_limit <group_id_prefix> <limit>");
+  
+  const groupPrefix = parts[1];
+  const val = parseInt(parts[2], 10);
+  if (isNaN(val)) return safeReply(ctx, "❌ Invalid number");
+  
+  try {
+    const groups = await q(`SELECT id FROM groups WHERE id::text LIKE $1`, [`${groupPrefix}%`]);
+    if (groups.rowCount === 0) return safeReply(ctx, "❌ Group not found");
+    
+    const groupId = groups.rows[0].id;
+    await updateGroupSettings(groupId, 'daily_codes_limit', val);
+    return safeReply(ctx, `✅ Daily limit set to ${val} for group ${groupId.slice(0, 8)}`);
+  } catch (err) {
+    console.error(err);
+    return safeReply(ctx, "❌ Error updating group");
+  }
+});
+
+bot.hears(/^\/set_group_time/, async (ctx) => {
+  if (ctx.from.id.toString() !== ADMIN_ID) return;
+  const parts = ctx.message.text.split(" ");
+  if (parts.length < 3) return safeReply(ctx, "❌ Usage: /set_group_time <group_id_prefix> 09:00");
+  
+  const groupPrefix = parts[1];
+  const time = parts[2];
+  if (!/^\d{2}:\d{2}$/.test(time)) return safeReply(ctx, "❌ Invalid format. Example: 09:00");
+  
+  try {
+    const groups = await q(`SELECT id FROM groups WHERE id::text LIKE $1`, [`${groupPrefix}%`]);
+    if (groups.rowCount === 0) return safeReply(ctx, "❌ Group not found");
+    
+    const groupId = groups.rows[0].id;
+    await updateGroupSettings(groupId, 'send_time', time);
+    return safeReply(ctx, `✅ Send time set to ${time} for group ${groupId.slice(0, 8)}`);
+  } catch (err) {
+    console.error(err);
+    return safeReply(ctx, "❌ Error updating group");
+  }
+});
+
 bot.on("text", async (ctx) => {
   const uid = ctx.from.id.toString();
   const text = ctx.message.text;
@@ -322,7 +395,11 @@ bot.on("text", async (ctx) => {
       const groupSettings = await getGroupSettings(groupId);
       const message = `📋 قم برفع ${groupSettings.distribution_days} كوداً (كود واحد لكل يوم)\n\n` +
                       `📌 كل كود متاح لـ ${groupSettings.daily_codes_limit} مستخدم\n\n` +
-                      `أرسل الأكواد واحداً تلو الآخر، ثم اكتب /done عند الانتهاء.`;
+                      `أرسل الأكواد واحداً تلو الآخر بالترتيب:\n` +
+                      `الكود الأول → اليوم الأول\n` +
+                      `الكود الثاني → اليوم الثاني\n` +
+                      `وهكذا...\n\n` +
+                      `ثم اكتب /done عند الانتهاء.`;
 
       userState[uid] = { 
         stage: "uploading_codes", 
@@ -346,10 +423,9 @@ bot.on("text", async (ctx) => {
       const userId = u.rows[0].id;
       const groupId = u.rows[0].group_id;
       
-      // Check if scheduler is active for this group
       const groupSettings = await getGroupSettings(groupId);
       if (!groupSettings.is_scheduler_active) {
-        return safeReply(ctx, "⏸️ التوزيع متوقف حالياً من قبل الأدمن.\n\nسيتم استئناف التوزيع عند إعادة التفعيل.");
+        return safeReply(ctx, "⏸️ التوزيع متوقف حالياً من قبل الأدمن.\n\نسيتم استئناف التوزيع عند إعادة التفعيل.");
       }
       
       const today = new Date().toISOString().slice(0, 10);
@@ -357,7 +433,7 @@ bot.on("text", async (ctx) => {
         `SELECT a.id as a_id, c.code_text, a.used FROM code_view_assignments a 
          JOIN codes c ON a.code_id=c.id 
          WHERE a.assigned_to_user_id=$1 AND a.assigned_date=$2 AND a.used=false
-         ORDER BY c.created_at LIMIT 1`,
+         ORDER BY c.day_number ASC, c.created_at ASC LIMIT 1`,
         [userId, today]
       );
       
@@ -367,11 +443,10 @@ bot.on("text", async (ctx) => {
 
       const row = res.rows[0];
       const keyboard = Markup.inlineKeyboard([
-        [Markup.button.callback("📋 نسخ الكود", `copy_${row.a_id}`)],
         [Markup.button.callback("✅ تم الاستخدام", `done_${row.a_id}`)],
       ]);
 
-      return safeReply(ctx, `📦 كود اليوم:\n\n\`${row.code_text}\`\n\nاضغط "نسخ الكود" ثم استخدمه، وبعد ذلك اضغط "تم الاستخدام"`, keyboard);
+      return safeReply(ctx, `📦 كود اليوم:\n\n\`${row.code_text}\`\n\n💡 اضغط على الكود لنسخه، ثم استخدمه\nبعد ذلك اضغط "تم الاستخدام"`, keyboard);
     } catch (err) {
       console.error("❌ اكواد_اليوم:", err.message);
       return safeReply(ctx, "❌ حدث خطأ، حاول لاحقًا.");
@@ -385,11 +460,11 @@ bot.on("text", async (ctx) => {
         return safeReply(ctx, "سجل أولًا باستخدام /تسجيل");
       }
       const userId = res.rows[0].id;
-      const codes = await q("SELECT code_text, status FROM codes WHERE owner_id=$1 ORDER BY created_at DESC", [userId]);
+      const codes = await q("SELECT code_text, status, day_number FROM codes WHERE owner_id=$1 ORDER BY day_number ASC, created_at ASC", [userId]);
       if (codes.rowCount === 0) {
         return safeReply(ctx, "❌ لا توجد لديك أكواد.");
       }
-      const list = codes.rows.map((c, i) => `${i + 1}. ${c.code_text} (${c.status || 'active'})`).join("\n");
+      const list = codes.rows.map((c, i) => `${i + 1}. ${c.code_text} - Day ${c.day_number || i+1} (${c.status || 'active'})`).join("\n");
       return safeReply(ctx, `📋 أكوادك:\n${list}`);
     } catch (err) {
       console.error("❌ اكوادى:", err.message);
@@ -415,6 +490,29 @@ bot.on("text", async (ctx) => {
       return safeReply(ctx, `✅ تم إرسال الرسالة إلى ${success} مستخدم.`);
     } catch (err) {
       console.error("❌ broadcast error:", err.message);
+      return safeReply(ctx, "❌ حدث خطأ أثناء الإرسال.");
+    }
+  }
+
+  if (uid === ADMIN_ID && groupBroadcastMode[uid]) {
+    const groupId = groupBroadcastMode[uid];
+    delete groupBroadcastMode[uid];
+    const message = ctx.message.text;
+    try {
+      const users = await q(`SELECT telegram_id FROM users WHERE group_id=$1`, [groupId]);
+      let success = 0;
+      for (const row of users.rows) {
+        try {
+          await bot.telegram.sendMessage(row.telegram_id, `📢 رسالة من الأدمن (Group ${groupId.slice(0, 8)}):\n\n${message}`);
+          success++;
+          await new Promise(r => setTimeout(r, 50));
+        } catch (err) {
+          console.error(`❌ Failed to send to ${row.telegram_id}`);
+        }
+      }
+      return safeReply(ctx, `✅ تم إرسال الرسالة إلى ${success} مستخدم في المجموعة.`);
+    } catch (err) {
+      console.error("❌ group broadcast error:", err.message);
       return safeReply(ctx, "❌ حدث خطأ أثناء الإرسال.");
     }
   }
@@ -454,11 +552,11 @@ bot.on("text", async (ctx) => {
         const groupSettings = await getGroupSettings(groupId);
 
         let inserted = 0;
-        for (const c of codes) {
+        for (let i = 0; i < codes.length; i++) {
           try {
             await q(
-              `INSERT INTO codes (owner_id, code_text, views_per_day, status, created_at) VALUES ($1,$2,$3,'active', NOW())`,
-              [owner_id, c, groupSettings.daily_codes_limit]
+              `INSERT INTO codes (owner_id, code_text, views_per_day, status, day_number, created_at) VALUES ($1,$2,$3,'active',$4, NOW())`,
+              [owner_id, codes[i], groupSettings.daily_codes_limit, i + 1]
             );
             inserted++;
           } catch (err) {
@@ -466,7 +564,7 @@ bot.on("text", async (ctx) => {
           }
         }
         delete userState[uid];
-        return safeReply(ctx, `✅ تم حفظ ${inserted} أكواد. شكراً!\n\nكل كود سيظهر لـ ${groupSettings.daily_codes_limit} مستخدم.`);
+        return safeReply(ctx, `✅ تم حفظ ${inserted} أكواد بالترتيب.\n\n📅 الكود 1 → اليوم 1\n📅 الكود 2 → اليوم 2\nوهكذا...\n\nكل كود سيظهر لـ ${groupSettings.daily_codes_limit} مستخدم.`);
       } catch (err) {
         console.error("❌ finishing upload:", err.message);
         delete userState[uid];
@@ -475,27 +573,12 @@ bot.on("text", async (ctx) => {
     }
 
     st.codes.push(codeText);
-    return safeReply(ctx, `✅ تم استلام الكود رقم ${st.codes.length}.\nأرسل الكود التالي أو اكتب /done للانتهاء.`);
+    return safeReply(ctx, `✅ تم استلام الكود رقم ${st.codes.length} (سيظهر في اليوم ${st.codes.length}).\nأرسل الكود التالي أو اكتب /done للانتهاء.`);
   }
 });
 
 bot.on("callback_query", async (ctx) => {
   const action = ctx.callbackQuery.data;
-
-  if (action.startsWith("copy_")) {
-    const assignmentId = action.replace("copy_", "");
-    try {
-      const res = await q("SELECT c.code_text FROM code_view_assignments a JOIN codes c ON a.code_id=c.id WHERE a.id=$1", [assignmentId]);
-      if (res.rowCount > 0) {
-        const codeText = res.rows[0].code_text;
-        await ctx.answerCbQuery(`الكود: ${codeText}`, { show_alert: true });
-        await safeReply(ctx, `📋 الكود:\n\`${codeText}\`\n\nانسخه واستخدمه، ثم اضغط "تم الاستخدام"`);
-      }
-    } catch (err) {
-      await ctx.answerCbQuery("❌ خطأ");
-    }
-    return;
-  }
 
   if (action.startsWith("done_")) {
     const assignmentId = action.replace("done_", "");
@@ -513,18 +596,17 @@ bot.on("callback_query", async (ctx) => {
           `SELECT a.id as a_id, c.code_text FROM code_view_assignments a 
            JOIN codes c ON a.code_id=c.id 
            WHERE a.assigned_to_user_id=$1 AND a.assigned_date=$2 AND a.used=false
-           ORDER BY c.created_at LIMIT 1`,
+           ORDER BY c.day_number ASC, c.created_at ASC LIMIT 1`,
           [userId, today]
         );
         
         if (nextCode.rowCount > 0) {
           const row = nextCode.rows[0];
           const keyboard = Markup.inlineKeyboard([
-            [Markup.button.callback("📋 نسخ الكود", `copy_${row.a_id}`)],
             [Markup.button.callback("✅ تم الاستخدام", `done_${row.a_id}`)],
           ]);
           await ctx.answerCbQuery("✅ رائع! إليك الكود التالي");
-          await safeReply(ctx, `📦 الكود التالي:\n\n\`${row.code_text}\`\n\nاضغط "نسخ الكود" ثم استخدمه`, keyboard);
+          await safeReply(ctx, `📦 الكود التالي:\n\n\`${row.code_text}\`\n\n💡 اضغط على الكود لنسخه`, keyboard);
         } else {
           await ctx.answerCbQuery("🎉 تم إكمال كل الأكواد!");
           await safeReply(ctx, "✅ تم إكمال جميع الأكواد اليوم! أحسنت 🎉");
@@ -566,39 +648,120 @@ bot.on("callback_query", async (ctx) => {
         return;
       }
       const keyboard = groups.rows.map(g => [
-        Markup.button.callback(`${g.is_scheduler_active ? '✅' : '❌'} Group ${g.id.toString().slice(0, 8)}`, `group_${g.id}`)
+        Markup.button.callback(`${g.is_scheduler_active ? '✅' : '❌'} Group ${g.id.toString().slice(0, 8)}`, `groupdetails_${g.id}`)
       ]);
       keyboard.push([Markup.button.callback("◀️ Back", "back_to_main")]);
-      await ctx.editMessageText("📦 Manage Groups (Click to toggle):", { reply_markup: { inline_keyboard: keyboard } });
+      await ctx.editMessageText("📦 Manage Groups (Click to view details):", { reply_markup: { inline_keyboard: keyboard } });
       await ctx.answerCbQuery();
       return;
     }
     
-    if (action.startsWith("group_")) {
-      const groupId = action.replace("group_", "");
+    if (action.startsWith("groupdetails_")) {
+      const groupId = action.replace("groupdetails_", "");
       
-      // التحقق من أن groupId هو UUID صحيح
       const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
       if (!uuidRegex.test(groupId)) {
         await ctx.answerCbQuery("❌ Invalid group ID - please refresh /admin");
         return;
       }
       
-      const g = await q(`SELECT is_scheduler_active FROM groups WHERE id=$1`, [groupId]);
+      const g = await q(`SELECT is_scheduler_active, daily_codes_limit, distribution_days, send_time FROM groups WHERE id=$1`, [groupId]);
       if (g.rowCount > 0) {
-        const newStatus = !g.rows[0].is_scheduler_active;
-        await q(`UPDATE groups SET is_scheduler_active=$1 WHERE id=$2`, [newStatus, groupId]);
-        await ctx.answerCbQuery(`Group ${groupId.slice(0, 8)}: ${newStatus ? 'Enabled' : 'Disabled'}`);
+        const group = g.rows[0];
+        const userCount = await q(`SELECT COUNT(*) FROM users WHERE group_id=$1`, [groupId]);
         
-        const groups = await q(`SELECT id, name, is_scheduler_active FROM groups ORDER BY created_at`);
-        const keyboard = groups.rows.map(gr => [
-          Markup.button.callback(`${gr.is_scheduler_active ? '✅' : '❌'} Group ${gr.id.toString().slice(0, 8)}`, `group_${gr.id}`)
+        const keyboard = Markup.inlineKeyboard([
+          [Markup.button.callback(`${group.is_scheduler_active ? '✅ Disable' : '❌ Enable'} Scheduler`, `grouptoggle_${groupId}`)],
+          [Markup.button.callback(`📅 Set Days (${group.distribution_days})`, `groupdays_${groupId}`)],
+          [Markup.button.callback(`👁️ Set Limit (${group.daily_codes_limit})`, `grouplimit_${groupId}`)],
+          [Markup.button.callback(`⏰ Set Time (${group.send_time})`, `grouptime_${groupId}`)],
+          [Markup.button.callback(`📢 Broadcast to Group`, `groupbroadcast_${groupId}`)],
+          [Markup.button.callback("◀️ Back to Groups", "manage_groups")],
         ]);
-        keyboard.push([Markup.button.callback("◀️ Back", "back_to_main")]);
-        await ctx.editMessageText("📦 Manage Groups (Click to toggle):", { reply_markup: { inline_keyboard: keyboard } });
+        
+        await ctx.editMessageText(
+          `📦 Group ${groupId.slice(0, 8)}\n\n` +
+          `👥 Users: ${userCount.rows[0].count}\n` +
+          `🔄 Scheduler: ${group.is_scheduler_active ? '✅ Active' : '❌ Inactive'}\n` +
+          `📅 Distribution Days: ${group.distribution_days}\n` +
+          `👁️ Daily Limit: ${group.daily_codes_limit}\n` +
+          `⏰ Send Time: ${group.send_time}`,
+          { reply_markup: keyboard.reply_markup }
+        );
+        await ctx.answerCbQuery();
       } else {
         await ctx.answerCbQuery("❌ Group not found");
       }
+      return;
+    }
+    
+    if (action.startsWith("grouptoggle_")) {
+      const groupId = action.replace("grouptoggle_", "");
+      
+      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (!uuidRegex.test(groupId)) {
+        await ctx.answerCbQuery("❌ Invalid group ID");
+        return;
+      }
+      
+      const g = await q(`SELECT is_scheduler_active FROM groups WHERE id=$1`, [groupId]);
+      if (g.rowCount > 0) {
+        const newStatus = !g.rows[0].is_scheduler_active;
+        await updateGroupSettings(groupId, 'is_scheduler_active', newStatus);
+        await ctx.answerCbQuery(`✅ Scheduler ${newStatus ? 'Enabled' : 'Disabled'}`);
+        
+        const updated = await q(`SELECT is_scheduler_active, daily_codes_limit, distribution_days, send_time FROM groups WHERE id=$1`, [groupId]);
+        const group = updated.rows[0];
+        const userCount = await q(`SELECT COUNT(*) FROM users WHERE group_id=$1`, [groupId]);
+        
+        const keyboard = Markup.inlineKeyboard([
+          [Markup.button.callback(`${group.is_scheduler_active ? '✅ Disable' : '❌ Enable'} Scheduler`, `grouptoggle_${groupId}`)],
+          [Markup.button.callback(`📅 Set Days (${group.distribution_days})`, `groupdays_${groupId}`)],
+          [Markup.button.callback(`👁️ Set Limit (${group.daily_codes_limit})`, `grouplimit_${groupId}`)],
+          [Markup.button.callback(`⏰ Set Time (${group.send_time})`, `grouptime_${groupId}`)],
+          [Markup.button.callback(`📢 Broadcast to Group`, `groupbroadcast_${groupId}`)],
+          [Markup.button.callback("◀️ Back to Groups", "manage_groups")],
+        ]);
+        
+        await ctx.editMessageText(
+          `📦 Group ${groupId.slice(0, 8)}\n\n` +
+          `👥 Users: ${userCount.rows[0].count}\n` +
+          `🔄 Scheduler: ${group.is_scheduler_active ? '✅ Active' : '❌ Inactive'}\n` +
+          `📅 Distribution Days: ${group.distribution_days}\n` +
+          `👁️ Daily Limit: ${group.daily_codes_limit}\n` +
+          `⏰ Send Time: ${group.send_time}`,
+          { reply_markup: keyboard.reply_markup }
+        );
+      }
+      return;
+    }
+    
+    if (action.startsWith("groupdays_")) {
+      const groupId = action.replace("groupdays_", "");
+      await safeReply(ctx, `📅 Send: /set_group_days ${groupId.slice(0, 8)} 20`);
+      await ctx.answerCbQuery();
+      return;
+    }
+    
+    if (action.startsWith("grouplimit_")) {
+      const groupId = action.replace("grouplimit_", "");
+      await safeReply(ctx, `👁️ Send: /set_group_limit ${groupId.slice(0, 8)} 50`);
+      await ctx.answerCbQuery();
+      return;
+    }
+    
+    if (action.startsWith("grouptime_")) {
+      const groupId = action.replace("grouptime_", "");
+      await safeReply(ctx, `⏰ Send: /set_group_time ${groupId.slice(0, 8)} 09:00`);
+      await ctx.answerCbQuery();
+      return;
+    }
+    
+    if (action.startsWith("groupbroadcast_")) {
+      const groupId = action.replace("groupbroadcast_", "");
+      groupBroadcastMode[ctx.from.id.toString()] = groupId;
+      await safeReply(ctx, `📢 Send your message to broadcast to Group ${groupId.slice(0, 8)}:`);
+      await ctx.answerCbQuery();
       return;
     }
     
@@ -676,13 +839,29 @@ async function runDailyDistribution() {
     
     for (const group of groups.rows) {
       const groupSettings = await getGroupSettings(group.id);
-      const codesRes = await q(
-        `SELECT c.id, c.owner_id, c.views_per_day FROM codes c 
-         JOIN users u ON c.owner_id=u.id 
-         WHERE c.status='active' AND u.group_id=$1 
-         ORDER BY c.id ASC`,
+      
+      const currentCycleDay = await q(
+        `SELECT COALESCE(MAX(day_number), 0) as max_day FROM code_view_assignments a
+         JOIN codes c ON a.code_id = c.id
+         JOIN users u ON c.owner_id = u.id
+         WHERE u.group_id = $1`,
         [group.id]
       );
+      
+      const nextDay = parseInt(currentCycleDay.rows[0].max_day) + 1;
+      
+      const codesRes = await q(
+        `SELECT c.id, c.owner_id, c.views_per_day, c.day_number FROM codes c 
+         JOIN users u ON c.owner_id=u.id 
+         WHERE c.status='active' AND u.group_id=$1 AND c.day_number=$2
+         ORDER BY c.created_at ASC`,
+        [group.id, nextDay]
+      );
+
+      if (codesRes.rowCount === 0) {
+        console.log(`⏭️ No codes for day ${nextDay} in group ${group.id}`);
+        continue;
+      }
 
       const usersRes = await q(`SELECT id FROM users WHERE group_id=$1`, [group.id]);
       const allUserIds = usersRes.rows.map(r => r.id);
@@ -720,7 +899,7 @@ async function runDailyDistribution() {
             console.error("❌ Failed assignment:", err.message);
           }
         }
-        console.log(`🔸 Group ${group.id} - Code ${c.id} distributed to ${assignedCount}/${viewersNeeded} new users`);
+        console.log(`🔸 Group ${group.id} - Day ${nextDay} - Code ${c.id} distributed to ${assignedCount}/${viewersNeeded} users`);
       }
     }
     console.log(`✅ Distribution complete`);
