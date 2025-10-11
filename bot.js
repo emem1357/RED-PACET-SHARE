@@ -1,5 +1,5 @@
 // bot.js - COMPLETE VERSION with enhanced per-group management
-import { Telegraf, Markup } from 
+import { Telegraf, Markup } from "telegraf";
 import fs from "fs";
 import pkg from "pg";
 import dotenv from "dotenv";
