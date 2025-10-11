@@ -322,7 +322,7 @@ bot.hears(/^\/set_group_days/, async (ctx) => {
     
     const groupId = groups.rows[0].id;
     await updateGroupSettings(groupId, 'distribution_days', val);
-    return safeReply(ctx, `✅ Distribution days set to ${val} for group ${groupId.slice(0, 8)}`);
+    return safeReply(ctx, `✅ Distribution days set to ${val} days for group ${groupId.slice(0, 8)}`);
   } catch (err) {
     console.error(err);
     return safeReply(ctx, "❌ Error updating group");
@@ -344,7 +344,7 @@ bot.hears(/^\/set_group_limit/, async (ctx) => {
     
     const groupId = groups.rows[0].id;
     await updateGroupSettings(groupId, 'daily_codes_limit', val);
-    return safeReply(ctx, `✅ Daily limit set to ${val} for group ${groupId.slice(0, 8)}`);
+    return safeReply(ctx, `✅ Daily codes limit set to ${val} views per code for group ${groupId.slice(0, 8)}`);
   } catch (err) {
     console.error(err);
     return safeReply(ctx, "❌ Error updating group");
