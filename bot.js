@@ -738,21 +738,21 @@ bot.on("callback_query", async (ctx) => {
     
     if (action.startsWith("groupdays_")) {
       const groupId = action.replace("groupdays_", "");
-      await safeReply(ctx, `📅 Send: /set_group_days ${groupId.slice(0, 8)} 20`);
+      await safeReply(ctx, `📅 Use command: /gdays ${groupId.slice(0, 8)} 20\n\nExample: /gdays ${groupId.slice(0, 8)} 15`);
       await ctx.answerCbQuery();
       return;
     }
     
     if (action.startsWith("grouplimit_")) {
       const groupId = action.replace("grouplimit_", "");
-      await safeReply(ctx, `👁️ Send: /set_group_limit ${groupId.slice(0, 8)} 50`);
+      await safeReply(ctx, `👁️ Use command: /glimit ${groupId.slice(0, 8)} 50\n\nExample: /glimit ${groupId.slice(0, 8)} 60`);
       await ctx.answerCbQuery();
       return;
     }
     
     if (action.startsWith("grouptime_")) {
       const groupId = action.replace("grouptime_", "");
-      await safeReply(ctx, `⏰ Send: /set_group_time ${groupId.slice(0, 8)} 09:00`);
+      await safeReply(ctx, `⏰ Use command: /gtime ${groupId.slice(0, 8)} 09:00\n\nExample: /gtime ${groupId.slice(0, 8)} 15:30`);
       await ctx.answerCbQuery();
       return;
     }
@@ -1161,4 +1161,4 @@ process.once("SIGTERM", () => {
     console.log("Stopping...");
     process.exit(0);
   }
-})
+});
