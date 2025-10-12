@@ -377,10 +377,18 @@ bot.on("text", async (ctx) => {
   const uid = ctx.from.id.toString();
   const text = ctx.message.text;
 
+  console.log("📨 TEXT RECEIVED:", text);
+  console.log("👤 FROM USER:", uid);
+  console.log("👑 ADMIN ID:", ADMIN_ID);
+
   // أوامر الأدمن للمجموعات - يجب أن تكون أولاً
   if (uid === ADMIN_ID) {
+    console.log("✅ Admin confirmed, checking commands...");
+    
     if (text.startsWith("/set_group_days ")) {
+      console.log("🎯 MATCHED: set_group_days");
       const parts = text.split(" ");
+      console.log("📋 PARTS:", parts);
       if (parts.length < 3) return safeReply(ctx, "❌ Usage: /set_group_days <group_id_prefix> <days>");
       
       const groupPrefix = parts[1];
@@ -401,7 +409,9 @@ bot.on("text", async (ctx) => {
     }
 
     if (text.startsWith("/set_group_limit ")) {
+      console.log("🎯 MATCHED: set_group_limit");
       const parts = text.split(" ");
+      console.log("📋 PARTS:", parts);
       if (parts.length < 3) return safeReply(ctx, "❌ Usage: /set_group_limit <group_id_prefix> <limit>");
       
       const groupPrefix = parts[1];
@@ -422,7 +432,9 @@ bot.on("text", async (ctx) => {
     }
 
     if (text.startsWith("/set_group_time ")) {
+      console.log("🎯 MATCHED: set_group_time");
       const parts = text.split(" ");
+      console.log("📋 PARTS:", parts);
       if (parts.length < 3) return safeReply(ctx, "❌ Usage: /set_group_time <group_id_prefix> 09:00");
       
       const groupPrefix = parts[1];
