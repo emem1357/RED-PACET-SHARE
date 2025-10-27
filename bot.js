@@ -1228,4 +1228,4 @@ process.once("SIGTERM", () => {
     console.log("Stopping...");
     process.exit(0);
   }
-})
+});
