@@ -29,6 +29,11 @@ const pool = new Pool({
 
 const ADMIN_ID = process.env.ADMIN_ID;
 
+// تحقق من DATABASE_URL
+const dbUrl = process.env.DATABASE_URL;
+console.log("📊 DATABASE_URL starts with:", dbUrl?.substring(0, 50) + "...");
+console.log("🔌 Connecting to:", dbUrl?.split('@')[1]?.split('/')[0] || "unknown");
+
 async function q(sql, params) {
   let retries = 3;
   while (retries > 0) {
