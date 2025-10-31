@@ -19,7 +19,7 @@ try {
   console.warn("⚠️ supabase-ca.crt not found — continuing without SSL CA.");
 }
 
-// pool will be created below with custom config to force fresh DNS resolution
+// (Removed duplicate pool declaration here. The actual pool is created below.)
 
 const ADMIN_ID = process.env.ADMIN_ID;
 
@@ -28,15 +28,11 @@ const dbUrl = process.env.DATABASE_URL;
 console.log("📊 DATABASE_URL starts with:", dbUrl?.substring(0, 50) + "...");
 console.log("🔌 Connecting to:", dbUrl?.split('@')[1]?.split('/')[0] || "unknown");
 
-// Force fresh DNS resolution
-const dns = require('dns');
-dns.setDefaultResultOrder('ipv4first');
-
 // Force close old pool and create new one
 let pool;
 try {
   const poolConfig = {
-    connectionString: process.env.DATABASE_URL?.replace(':6543', ':5432') || process.env.DATABASE_URL,
+    connectionString: process.env.DATABASE_URL, // استخدم Port الأصلي (6543 أو 5432)
     ...(sslConfig ? { ssl: sslConfig } : {}),
     max: 20,
     idleTimeoutMillis: 30000,
@@ -46,7 +42,7 @@ try {
     application_name: 'render_bot_' + Date.now(),
   };
   
-  console.log("🔄 Creating new pool with fresh DNS...");
+  console.log("🔄 Creating new pool...");
   pool = new Pool(poolConfig);
   
   // Test connection immediately
@@ -63,10 +59,10 @@ try {
       console.error("   Error message:", err.message);
       console.error("   Error code:", err.code);
       if (err.code === 'ECONNREFUSED') {
-        console.error("   🔴 Connection refused - check if Database is accessible");
-        console.error("   💡 Try: Check Supabase Dashboard if database is active");
+        console.error("   🔴 Connection refused");
+        console.error("   💡 Supabase may be paused or unreachable from your region");
       } else if (err.code === '28P01') {
-        console.error("   🔴 Authentication failed - check password");
+        console.error("   🔴 Authentication failed - check password in DATABASE_URL");
       }
     }
   })();
