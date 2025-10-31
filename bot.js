@@ -19,7 +19,7 @@ try {
   console.warn("⚠️ supabase-ca.crt not found — continuing without SSL CA.");
 }
 
-// pool initialization moved to line 32
+// pool will be created below with custom config to force fresh DNS resolution
 
 const ADMIN_ID = process.env.ADMIN_ID;
 
@@ -28,26 +28,46 @@ const dbUrl = process.env.DATABASE_URL;
 console.log("📊 DATABASE_URL starts with:", dbUrl?.substring(0, 50) + "...");
 console.log("🔌 Connecting to:", dbUrl?.split('@')[1]?.split('/')[0] || "unknown");
 
+// Force fresh DNS resolution
+const dns = require('dns');
+dns.setDefaultResultOrder('ipv4first');
+
 // Force close old pool and create new one
 let pool;
 try {
-  pool = new Pool({
+  const poolConfig = {
     connectionString: process.env.DATABASE_URL?.replace(':6543', ':5432') || process.env.DATABASE_URL,
     ...(sslConfig ? { ssl: sslConfig } : {}),
     max: 20,
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 20000,
     statement_timeout: 30000,
-  });
+    // Force fresh connection
+    application_name: 'render_bot_' + Date.now(),
+  };
+  
+  console.log("🔄 Creating new pool with fresh DNS...");
+  pool = new Pool(poolConfig);
   
   // Test connection immediately
   (async () => {
     try {
+      console.log("🔍 Testing database connection...");
       const client = await pool.connect();
+      const result = await client.query('SELECT NOW()');
       console.log("✅ Database connected successfully!");
+      console.log("⏰ Database time:", result.rows[0].now);
       client.release();
     } catch (err) {
-      console.error("❌ Database connection test failed:", err.message);
+      console.error("❌ Database connection test failed:");
+      console.error("   Error message:", err.message);
+      console.error("   Error code:", err.code);
+      if (err.code === 'ECONNREFUSED') {
+        console.error("   🔴 Connection refused - check if Database is accessible");
+        console.error("   💡 Try: Check Supabase Dashboard if database is active");
+      } else if (err.code === '28P01') {
+        console.error("   🔴 Authentication failed - check password");
+      }
     }
   })();
 } catch (err) {
