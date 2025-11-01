@@ -19,7 +19,13 @@ try {
   console.warn("⚠️ supabase-ca.crt not found — continuing without SSL CA.");
 }
 
-// (Removed duplicate pool declaration here. The actual pool is created below.)
+// const pool = new Pool({
+//   connectionString: process.env.DATABASE_URL,
+//   ...(sslConfig ? { ssl: sslConfig } : {}),
+//   max: 20,
+//   idleTimeoutMillis: 30000,
+//   connectionTimeoutMillis: 10000,
+// });
 
 const ADMIN_ID = process.env.ADMIN_ID;
 
@@ -190,6 +196,7 @@ function mainKeyboard(userId) {
   const buttons = [
     [Markup.button.text("/تسجيل"), Markup.button.text("/رفع_اكواد")],
     [Markup.button.text("/اكواد_اليوم"), Markup.button.text("/اكوادى")],
+    [Markup.button.text("📸 إرسال إثبات الدفع")],
     [Markup.button.contactRequest("📱 إرسال رقم الهاتف")],
   ];
   if (userId?.toString() === ADMIN_ID?.toString()) {
@@ -259,6 +266,46 @@ bot.on("contact", async (ctx) => {
   } catch (err) {
     console.error("❌ contact handler:", err.message);
     return safeReply(ctx, "❌ حدث خطأ داخلي أثناء التسجيل.");
+  }
+});
+
+bot.on("photo", async (ctx) => {
+  try {
+    const tgId = ctx.from.id.toString();
+    
+    // التحقق من أن المستخدم مسجل
+    const userRes = await q("SELECT id, group_id, auto_name FROM users WHERE telegram_id=$1", [tgId]);
+    if (userRes.rowCount === 0) {
+      return safeReply(ctx, "⚠️ يجب التسجيل أولاً باستخدام /تسجيل");
+    }
+    
+    const user = userRes.rows[0];
+    const groupId = user.group_id;
+    const userName = user.auto_name;
+    
+    // الحصول على أكبر صورة (أفضل جودة)
+    const photo = ctx.message.photo[ctx.message.photo.length - 1];
+    const caption = ctx.message.caption || "";
+    
+    // إرسال الصورة للأدمن
+    try {
+      await bot.telegram.sendPhoto(ADMIN_ID, photo.file_id, {
+        caption: `📸 إثبات دفع جديد\n\n` +
+                 `👤 المستخدم: ${userName}\n` +
+                 `🆔 Group: ${groupId.toString().slice(0, 8)}\n` +
+                 `📱 Telegram ID: ${tgId}\n` +
+                 `💬 الرسالة: ${caption || 'لا توجد رسالة'}`,
+        parse_mode: 'HTML'
+      });
+      
+      await safeReply(ctx, "✅ تم إرسال إثبات الدفع بنجاح!\n\n⏳ سيتم مراجعته من قبل الإدارة قريباً.");
+    } catch (err) {
+      console.error("❌ Error sending to admin:", err.message);
+      await safeReply(ctx, "❌ حدث خطأ أثناء إرسال الصورة. حاول مرة أخرى.");
+    }
+  } catch (err) {
+    console.error("❌ photo handler:", err.message);
+    await safeReply(ctx, "❌ حدث خطأ. تأكد من تسجيلك أولاً.");
   }
 });
 
@@ -418,7 +465,7 @@ bot.on("text", async (ctx) => {
   const uid = ctx.from.id.toString();
   const text = ctx.message.text;
 
-  // ✅ أوامر المجموعات - يجب أن تكون في البداية قبل أي شيء
+  // أوامر المجموعات - يجب أن تكون في البداية قبل أي شيء
   if (uid === ADMIN_ID) {
     // أوامر قصيرة جديدة
     if (text.startsWith("/gdays ")) {
@@ -482,6 +529,21 @@ bot.on("text", async (ctx) => {
         console.error(err);
         return safeReply(ctx, "❌ Error updating group");
       }
+    }
+  }
+
+  // معالج زر إثبات الدفع
+  if (text === "📸 إرسال إثبات الدفع") {
+    try {
+      const userRes = await q("SELECT id FROM users WHERE telegram_id=$1", [uid]);
+      if (userRes.rowCount === 0) {
+        return safeReply(ctx, "⚠️ يجب التسجيل أولاً باستخدام /تسجيل");
+      }
+      
+      return safeReply(ctx, "📸 أرسل الآن صورة إثبات الدفع\n\n💡 يمكنك إضافة رسالة مع الصورة إذا أردت\n\n⚠️ تأكد من وضوح الصورة");
+    } catch (err) {
+      console.error("❌ payment proof button:", err.message);
+      return safeReply(ctx, "❌ حدث خطأ، حاول لاحقًا.");
     }
   }
 
@@ -931,7 +993,7 @@ bot.on("callback_query", async (ctx) => {
       const c = await q(`SELECT COUNT(*) FROM codes WHERE status='active'`);
       const g = await q(`SELECT COUNT(*) FROM groups`);
       const s = await getAdminSettings();
-      await safeReply(ctx, `📊 Stats:\n\nUsers: ${u.rows[0].count}\nActive Codes: ${c.rows[0].count}\nGroups: ${g.rows[0].count}\nMax Groups: ${s.max_groups || 'Unlimited'}\nScheduler: ${s.is_scheduler_active ? "On" : "Off"}`);
+      await safeReply(ctx, `📊 Stats:\n\nUsers: ${u.rows[0].count}\nActive Codes: ${c.rows[0].count}\nGroups: ${g.rows[0].count}\nMax Groups: ${s.max_groups || 'Unlimited'}\nScheduler: ${s.is_scheduler_active ? "On" : "Off"}\n\n💡 Tip: Users can now send payment proofs via "📸 إرسال إثبات الدفع" button`);
     }
     await ctx.answerCbQuery();
   } catch (err) {
