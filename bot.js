@@ -206,7 +206,21 @@ function mainKeyboard(userId) {
 }
 
 bot.start(async (ctx) => {
-  await safeReply(ctx, "👋 أهلاً بك في البوت!\n\n/تسجيل - للتسجيل\n/رفع_اكواد - لرفع الأكواد\n/اكواد_اليوم - لعرض أكواد اليوم\n/اكوادى - لعرض أكوادك", mainKeyboard(ctx.from.id));
+  const rulesMessage = `👋 أهلاً بك في البوت!\n\n` +
+    `📜 قواعد الاستخدام:\n\n` +
+    `✅ استخدم الكود يومياً قبل منتصف الليل\n` +
+    `✅ اضغط "تم الاستخدام" في البوت\n` +
+    `✅ الالتزام مهم\n\n` +
+    `⚠️ العقوبات:\n` +
+    `❌ يوم واحد: تذكير ونقل باقى الأكواد الى اليوم التالى\n` +
+    `❌ يومين: تحذير نهائي\n` +
+    `❌ 3 أيام: إيقاف تلقائي + حذف أكوادك\n\n` +
+    `/تسجيل - للتسجيل\n` +
+    `/رفع_اكواد - لرفع الأكواد\n` +
+    `/اكواد_اليوم - لعرض أكواد اليوم\n` +
+    `/اكوادى - لعرض أكوادك`;
+  
+  await safeReply(ctx, rulesMessage, mainKeyboard(ctx.from.id));
 });
 
 bot.hears(/^\/تسجيل/, async (ctx) => {
@@ -1216,6 +1230,105 @@ cron.schedule("0 0 1 * *", async () => {
     console.log("✅ تم مسح البيانات");
   } catch (err) {
     console.error("❌ خطأ دورة جديدة:", err);
+  }
+});
+
+// رسالة صباحية (9 صباحاً)
+cron.schedule("0 9 * * *", async () => {
+  try {
+    console.log("📢 Sending morning reminders...");
+    const users = await q(`SELECT telegram_id FROM users WHERE verified=true`);
+    const message = `🌅 صباح الخير!\n\n📦 كود اليوم جاهز\n\nاكتب /اكواد_اليوم للحصول عليه`;
+    
+    for (const row of users.rows) {
+      try {
+        await bot.telegram.sendMessage(row.telegram_id, message);
+        await new Promise(r => setTimeout(r, 100));
+      } catch (err) {
+        console.error(`❌ Failed to send morning reminder to ${row.telegram_id}`);
+      }
+    }
+    console.log(`✅ Sent ${users.rowCount} morning reminders`);
+  } catch (err) {
+    console.error("❌ Morning reminder error:", err);
+  }
+});
+
+// رسالة مسائية (8 مساءً)
+cron.schedule("0 20 * * *", async () => {
+  try {
+    console.log("📢 Sending evening reminders...");
+    const today = new Date().toISOString().slice(0, 10);
+    
+    const incompleteUsers = await q(
+      `SELECT DISTINCT u.telegram_id 
+       FROM code_view_assignments a 
+       JOIN users u ON a.assigned_to_user_id = u.id 
+       WHERE a.assigned_date=$1 AND a.used=false`,
+      [today]
+    );
+    
+    const message = `⏰ تذكير: هل استخدمت الكود؟\n\n` +
+                   `✅ إذا استخدمته: اضغط "تم الاستخدام"\n` +
+                   `📸 و أرسل screenshot\n\n` +
+                   `⚠️ المهلة: حتى منتصف الليل`;
+    
+    for (const row of incompleteUsers.rows) {
+      try {
+        await bot.telegram.sendMessage(row.telegram_id, message);
+        await new Promise(r => setTimeout(r, 100));
+      } catch (err) {
+        console.error(`❌ Failed to send evening reminder to ${row.telegram_id}`);
+      }
+    }
+    console.log(`✅ Sent ${incompleteUsers.rowCount} evening reminders`);
+  } catch (err) {
+    console.error("❌ Evening reminder error:", err);
+  }
+});
+
+// رسالة منتصف الليل (12 ص) - للمتأخرين
+cron.schedule("0 0 * * *", async () => {
+  try {
+    console.log("📢 Sending midnight warnings...");
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    const yesterdayStr = yesterday.toISOString().slice(0, 10);
+    
+    const missedUsers = await q(
+      `SELECT DISTINCT u.telegram_id, up.missed_days
+       FROM code_view_assignments a 
+       JOIN users u ON a.assigned_to_user_id = u.id
+       LEFT JOIN user_penalties up ON up.user_id = u.id
+       WHERE a.assigned_date=$1 AND a.used=false`,
+      [yesterdayStr]
+    );
+    
+    for (const row of missedUsers.rows) {
+      try {
+        const missedDays = (row.missed_days || 0) + 1;
+        let message = `❌ فاتك كود اليوم!\n\n`;
+        
+        if (missedDays === 1) {
+          message += `⚠️ هذا اليوم الأول\nيومين آخرين = إيقاف\n\n💡 ضبّط منبه يومياً!`;
+        } else if (missedDays === 2) {
+          message += `⚠️ هذا اليوم الثاني!\n\n🚨 تحذير نهائي\nيوم واحد آخر = إيقاف تلقائي`;
+        } else if (missedDays >= 3) {
+          message += `❌ 3 أيام متتالية بدون استخدام\n\n🚫 تم إيقاف حسابك تلقائياً\n📋 تم حذف جميع أكوادك`;
+        }
+        
+        await bot.telegram.sendMessage(row.telegram_id, message);
+        await new Promise(r => setTimeout(r, 100));
+      } catch (err) {
+        console.error(`❌ Failed to send midnight warning to ${row.telegram_id}`);
+      }
+    }
+    console.log(`✅ Sent ${missedUsers.rowCount} midnight warnings`);
+    
+    // Reactivate suspended codes
+    await reactivateSuspendedCodes();
+  } catch (err) {
+    console.error("❌ Midnight warning error:", err);
   }
 });
 
