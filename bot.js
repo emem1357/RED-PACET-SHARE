@@ -1,4 +1,4 @@
-// bot.js - COMPLETE VERSION with enhanced per-group management
+// bot.js - COMPLETE FINAL VERSION with all features
 import { Telegraf, Markup } from "telegraf";
 import fs from "fs";
 import pkg from "pg";
@@ -19,14 +19,6 @@ try {
   console.warn("⚠️ supabase-ca.crt not found — continuing without SSL CA.");
 }
 
-// const pool = new Pool({
-//   connectionString: process.env.DATABASE_URL,
-//   ...(sslConfig ? { ssl: sslConfig } : {}),
-//   max: 20,
-//   idleTimeoutMillis: 30000,
-//   connectionTimeoutMillis: 10000,
-// });
-
 const ADMIN_ID = process.env.ADMIN_ID;
 
 // تحقق من DATABASE_URL
@@ -38,13 +30,12 @@ console.log("🔌 Connecting to:", dbUrl?.split('@')[1]?.split('/')[0] || "unkno
 let pool;
 try {
   const poolConfig = {
-    connectionString: process.env.DATABASE_URL, // استخدم Port الأصلي (6543 أو 5432)
+    connectionString: process.env.DATABASE_URL,
     ...(sslConfig ? { ssl: sslConfig } : {}),
     max: 20,
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 20000,
     statement_timeout: 30000,
-    // Force fresh connection
     application_name: 'render_bot_' + Date.now(),
   };
   
@@ -223,6 +214,24 @@ bot.start(async (ctx) => {
   await safeReply(ctx, rulesMessage, mainKeyboard(ctx.from.id));
 });
 
+// أمر للحصول على Chat ID للجروب (للأدمن فقط)
+bot.command("get_chat_id", async (ctx) => {
+  if (ctx.from.id.toString() !== ADMIN_ID) return;
+  
+  const chatId = ctx.chat.id;
+  const chatType = ctx.chat.type;
+  const chatTitle = ctx.chat.title || "Private Chat";
+  
+  await safeReply(ctx, 
+    `📊 معلومات الـ Chat:\n\n` +
+    `🆔 Chat ID: <code>${chatId}</code>\n` +
+    `📝 النوع: ${chatType}\n` +
+    `🏷️ الاسم: ${chatTitle}\n\n` +
+    `💡 استخدم هذا Chat ID لإرسال رسائل تلقائية لهذا الجروب`,
+    { parse_mode: 'HTML' }
+  );
+});
+
 bot.hears(/^\/تسجيل/, async (ctx) => {
   try {
     const tgId = ctx.from.id.toString();
@@ -287,7 +296,6 @@ bot.on("photo", async (ctx) => {
   try {
     const tgId = ctx.from.id.toString();
     
-    // التحقق من أن المستخدم مسجل
     const userRes = await q("SELECT id, group_id, auto_name FROM users WHERE telegram_id=$1", [tgId]);
     if (userRes.rowCount === 0) {
       return safeReply(ctx, "⚠️ يجب التسجيل أولاً باستخدام /تسجيل");
@@ -297,11 +305,9 @@ bot.on("photo", async (ctx) => {
     const groupId = user.group_id;
     const userName = user.auto_name;
     
-    // الحصول على أكبر صورة (أفضل جودة)
     const photo = ctx.message.photo[ctx.message.photo.length - 1];
     const caption = ctx.message.caption || "";
     
-    // إرسال الصورة للأدمن
     try {
       await bot.telegram.sendPhoto(ADMIN_ID, photo.file_id, {
         caption: `📸 إثبات دفع جديد\n\n` +
@@ -382,6 +388,27 @@ bot.hears(/^\/set_max_groups/, async (ctx) => {
   
   await updateAdminSettings("max_groups", val);
   return safeReply(ctx, `✅ Max groups set to ${val === null ? 'Unlimited' : val}`);
+});
+
+bot.hears(/^\/set_group_chat_id/, async (ctx) => {
+  if (ctx.from.id.toString() !== ADMIN_ID) return;
+  const parts = ctx.message.text.split(" ");
+  if (parts.length < 3) return safeReply(ctx, "❌ Usage: /set_group_chat_id <group_id_prefix> <chat_id>\n\nExample: /set_group_chat_id 5d124af3 -1001234567890");
+  
+  const groupPrefix = parts[1];
+  const chatId = parts[2];
+  
+  try {
+    const groups = await q(`SELECT id FROM groups WHERE id::text LIKE $1`, [`${groupPrefix}%`]);
+    if (groups.rowCount === 0) return safeReply(ctx, "❌ Group not found");
+    
+    const groupId = groups.rows[0].id;
+    await q(`UPDATE groups SET telegram_group_chat_id = $1 WHERE id = $2`, [chatId, groupId]);
+    return safeReply(ctx, `✅ Telegram Group Chat ID set to ${chatId} for group ${groupId.slice(0, 8)}`);
+  } catch (err) {
+    console.error(err);
+    return safeReply(ctx, "❌ Error updating group");
+  }
 });
 
 bot.hears(/^\/reset_cycle/, async (ctx) => {
@@ -479,9 +506,7 @@ bot.on("text", async (ctx) => {
   const uid = ctx.from.id.toString();
   const text = ctx.message.text;
 
-  // أوامر المجموعات - يجب أن تكون في البداية قبل أي شيء
   if (uid === ADMIN_ID) {
-    // أوامر قصيرة جديدة
     if (text.startsWith("/gdays ")) {
       const parts = text.split(" ");
       if (parts.length < 3) return safeReply(ctx, "❌ Usage: /gdays <group_id_prefix> <days>");
@@ -546,7 +571,6 @@ bot.on("text", async (ctx) => {
     }
   }
 
-  // معالج زر إثبات الدفع
   if (text === "📸 إرسال إثبات الدفع") {
     try {
       const userRes = await q("SELECT id FROM users WHERE telegram_id=$1", [uid]);
@@ -996,7 +1020,7 @@ bot.on("callback_query", async (ctx) => {
     } else if (action === "set_days") {
       await safeReply(ctx, "📅 Send: /set_days 20");
     } else if (action === "set_group") {
-      await safeReply(ctx, "👥 Send: /set_group_size 1000");
+      await safeReply(ctx, "👥 Send: /set_group 1000");
     } else if (action === "set_max_groups") {
       await safeReply(ctx, "🔢 Send: /set_max_groups 10 (or NULL)");
     } else if (action === "broadcast") {
@@ -1221,19 +1245,9 @@ async function reactivateSuspendedCodes() {
   }
 }
 
-cron.schedule("0 0 1 * *", async () => {
-  try {
-    console.log("🔄 بدء دورة جديدة...");
-    await q("DELETE FROM code_view_assignments");
-    await q("DELETE FROM codes");
-    await q("DELETE FROM user_penalties");
-    console.log("✅ تم مسح البيانات");
-  } catch (err) {
-    console.error("❌ خطأ دورة جديدة:", err);
-  }
-});
+// ==================== CRON JOBS ====================
 
-// رسالة صباحية (9 صباحاً)
+// 1️⃣ رسالة صباحية (9 صباحاً)
 cron.schedule("0 9 * * *", async () => {
   try {
     console.log("📢 Sending morning reminders...");
@@ -1254,7 +1268,7 @@ cron.schedule("0 9 * * *", async () => {
   }
 });
 
-// رسالة مسائية (8 مساءً)
+// 2️⃣ رسالة مسائية (8 مساءً)
 cron.schedule("0 20 * * *", async () => {
   try {
     console.log("📢 Sending evening reminders...");
@@ -1287,7 +1301,7 @@ cron.schedule("0 20 * * *", async () => {
   }
 });
 
-// رسالة منتصف الليل (12 ص) - للمتأخرين
+// 3️⃣ رسالة منتصف الليل (12 ص) + معالجة الأكواد غير المستخدمة
 cron.schedule("0 0 * * *", async () => {
   try {
     console.log("📢 Sending midnight warnings...");
@@ -1296,7 +1310,7 @@ cron.schedule("0 0 * * *", async () => {
     const yesterdayStr = yesterday.toISOString().slice(0, 10);
     
     const missedUsers = await q(
-      `SELECT DISTINCT u.telegram_id, up.missed_days
+      `SELECT DISTINCT u.telegram_id, u.id as user_id, up.missed_days
        FROM code_view_assignments a 
        JOIN users u ON a.assigned_to_user_id = u.id
        LEFT JOIN user_penalties up ON up.user_id = u.id
@@ -1325,13 +1339,14 @@ cron.schedule("0 0 * * *", async () => {
     }
     console.log(`✅ Sent ${missedUsers.rowCount} midnight warnings`);
     
-    // Reactivate suspended codes
+    await handleUnusedCodes();
     await reactivateSuspendedCodes();
   } catch (err) {
     console.error("❌ Midnight warning error:", err);
   }
 });
 
+// 4️⃣ التوزيع اليومي (يعمل كل دقيقة ويتحقق من وقت كل مجموعة)
 cron.schedule("* * * * *", async () => {
   try {
     const groups = await q(`SELECT id, send_time, is_scheduler_active FROM groups WHERE is_scheduler_active=true`);
@@ -1345,7 +1360,6 @@ cron.schedule("* * * * *", async () => {
       if (currentHour === targetHour && currentMinute === targetMinute) {
         console.log(`🌅 Running distribution for group ${group.id} at ${group.send_time}`);
         await runDailyDistribution();
-        await handleUnusedCodes();
         break;
       }
     }
@@ -1354,19 +1368,95 @@ cron.schedule("* * * * *", async () => {
   }
 });
 
+// 5️⃣ رسائل تحفيزية (6 مساءً)
 cron.schedule("0 18 * * *", async () => {
   try {
     await sendMotivationalReminders();
   } catch (err) {
-    console.error("❌ Evening reminder error:", err);
+    console.error("❌ Motivational reminder error:", err);
   }
 });
 
-cron.schedule("0 0 * * *", async () => {
+// 6️⃣ بدء دورة جديدة (أول كل شهر - 1 صباحاً)
+cron.schedule("0 1 1 * *", async () => {
   try {
-    await reactivateSuspendedCodes();
+    console.log("🔄 بدء دورة جديدة...");
+    await q("DELETE FROM code_view_assignments");
+    await q("DELETE FROM codes");
+    await q("DELETE FROM user_penalties");
+    console.log("✅ تم مسح البيانات وبدء دورة جديدة");
   } catch (err) {
-    console.error("❌ Reactivation error:", err);
+    console.error("❌ خطأ دورة جديدة:", err);
+  }
+});
+
+// 7️⃣ رسائل يومية للجروب (9 مساءً) - تقرير يومي
+cron.schedule("0 21 * * *", async () => {
+  try {
+    console.log("📢 Sending daily group reports...");
+    const today = new Date().toISOString().slice(0, 10);
+    
+    const groups = await q(`SELECT id, telegram_group_chat_id, name FROM groups WHERE telegram_group_chat_id IS NOT NULL`);
+    
+    for (const group of groups.rows) {
+      if (!group.telegram_group_chat_id) continue;
+      
+      try {
+        const totalUsers = await q(`SELECT COUNT(*) FROM users WHERE group_id=$1`, [group.id]);
+        const completedToday = await q(
+          `SELECT COUNT(DISTINCT a.assigned_to_user_id) 
+           FROM code_view_assignments a 
+           JOIN users u ON a.assigned_to_user_id = u.id 
+           WHERE u.group_id=$1 AND a.assigned_date=$2 AND a.used=true`,
+          [group.id, today]
+        );
+        const incompleteToday = await q(
+          `SELECT u.auto_name
+           FROM code_view_assignments a 
+           JOIN users u ON a.assigned_to_user_id = u.id 
+           WHERE u.group_id=$1 AND a.assigned_date=$2 AND a.used=false
+           GROUP BY u.id, u.auto_name
+           ORDER BY u.auto_name
+           LIMIT 10`,
+          [group.id, today]
+        );
+        
+        const totalCount = parseInt(totalUsers.rows[0].count);
+        const completedCount = parseInt(completedToday.rows[0].count);
+        const incompleteCount = totalCount - completedCount;
+        const completionRate = totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0;
+        
+        let message = `📊 تقرير اليوم - Group ${group.id.toString().slice(0, 8)}\n\n`;
+        message += `👥 إجمالي المستخدمين: ${totalCount}\n`;
+        message += `✅ أكملوا الأكواد: ${completedCount} (${completionRate}%)\n`;
+        message += `⚠️ لم يكملوا بعد: ${incompleteCount}\n\n`;
+        
+        if (incompleteCount > 0 && incompleteToday.rows.length > 0) {
+          message += `⏰ المتبقي عليهم:\n`;
+          incompleteToday.rows.forEach(u => {
+            message += `• ${u.auto_name}\n`;
+          });
+          
+          if (incompleteCount > 10) {
+            message += `... وآخرون (${incompleteCount - 10})\n`;
+          }
+          
+          message += `\n⏳ المهلة: حتى منتصف الليل\n`;
+          message += `💡 شجّع زملاءك على الالتزام!`;
+        } else {
+          message += `🎉 ممتاز! الجميع أكمل أكواده اليوم! 🔥`;
+        }
+        
+        await bot.telegram.sendMessage(group.telegram_group_chat_id, message);
+        console.log(`✅ Sent daily report to group ${group.id}`);
+        await new Promise(r => setTimeout(r, 200));
+      } catch (err) {
+        console.error(`❌ Failed to send to group ${group.id}:`, err.message);
+      }
+    }
+    console.log(`✅ Sent daily reports to ${groups.rowCount} groups`);
+  } catch (err) {
+    console.error("❌ Daily group report error:", err);
   }
 });
 
