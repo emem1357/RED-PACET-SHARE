@@ -285,7 +285,24 @@ bot.on("contact", async (ctx) => {
 
     await q(`INSERT INTO users (telegram_id, binance_id, phone, auto_name, group_id, verified, created_at) VALUES ($1,$2,$3,$4,$5,true,NOW())`, [tgId, st.binance || null, phone, autoName, groupId]);
     delete userState[tgId];
-    return safeReply(ctx, `✅ تم التسجيل بنجاح!\nالمجموعة: ${groupId}\nاسمك التلقائي: ${autoName}`, mainKeyboard(ctx.from.id));
+    
+    const welcomeMessage = `🎉 أهلاً بك فى بوت تبادل أكواد الظرف الأحمر\n\n` +
+      `✅ تم التسجيل بنجاح!\n\n` +
+      `🆔 المجموعة: ${groupId.toString().slice(0, 8)}\n` +
+      `👤 اسمك: ${autoName}\n\n` +
+      `━━━━━━━━━━━━━━━━━\n\n` +
+      `📜 قواعد الاستخدام:\n\n` +
+      `✅ استخدم الكود يومياً قبل منتصف الليل\n` +
+      `✅ اضغط "تم الاستخدام" في البوت\n` +
+      `✅ الالتزام مهم\n\n` +
+      `⚠️ العقوبات:\n\n` +
+      `❌ يوم واحد: تذكير ونقل باقى الأكواد الى اليوم التالى\n` +
+      `❌ يومين: تحذير نهائي\n` +
+      `❌ 3 أيام: إيقاف تلقائي + حذف أكوادك\n\n` +
+      `━━━━━━━━━━━━━━━━━\n\n` +
+      `💡 استخدم /start لعرض القائمة الرئيسية`;
+    
+    return safeReply(ctx, welcomeMessage, mainKeyboard(ctx.from.id));
   } catch (err) {
     console.error("❌ contact handler:", err.message);
     return safeReply(ctx, "❌ حدث خطأ داخلي أثناء التسجيل.");
@@ -1326,9 +1343,26 @@ cron.schedule("0 0 * * *", async () => {
         if (missedDays === 1) {
           message += `⚠️ هذا اليوم الأول\nيومين آخرين = إيقاف\n\n💡 ضبّط منبه يومياً!`;
         } else if (missedDays === 2) {
-          message += `⚠️ هذا اليوم الثاني!\n\n🚨 تحذير نهائي\nيوم واحد آخر = إيقاف تلقائي`;
+          message += `⚠️ هذا اليوم الثاني!\n\n🚨 تحذير نهائي\nيوم واحد آخر = حذف الحساب نهائياً`;
         } else if (missedDays >= 3) {
-          message += `❌ 3 أيام متتالية بدون استخدام\n\n🚫 تم إيقاف حسابك تلقائياً\n📋 تم حذف جميع أكوادك`;
+          message += `❌ 3 أيام متتالية بدون استخدام\n\n🚫 تم حذف حسابك نهائياً من البوت\n📋 تم حذف جميع أكوادك\n\n⚠️ لإعادة التسجيل: استخدم /تسجيل`;
+          
+          // حذف كامل للمستخدم
+          console.log(`🗑️ Deleting user ${row.user_id} after 3 days penalty`);
+          
+          // 1. حذف كل الأكواد
+          await q(`DELETE FROM codes WHERE owner_id=$1`, [row.user_id]);
+          
+          // 2. حذف كل التوزيعات
+          await q(`DELETE FROM code_view_assignments WHERE assigned_to_user_id=$1`, [row.user_id]);
+          
+          // 3. حذف العقوبات
+          await q(`DELETE FROM user_penalties WHERE user_id=$1`, [row.user_id]);
+          
+          // 4. حذف المستخدم نفسه
+          await q(`DELETE FROM users WHERE id=$1`, [row.user_id]);
+          
+          console.log(`✅ User ${row.user_id} deleted completely from database`);
         }
         
         await bot.telegram.sendMessage(row.telegram_id, message);
