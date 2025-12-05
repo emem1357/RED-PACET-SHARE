@@ -87,8 +87,8 @@ async function q(sql, params) {
 async function ensureAdminSettings() {
   try {
     await q(
-      `INSERT INTO admin_settings (id, daily_codes_limit, distribution_days, group_size, send_time, is_scheduler_active, max_groups)
-       VALUES (1, 50, 20, 1000, '09:00:00', $1, NULL) ON CONFLICT (id) DO NOTHING`,
+      `INSERT INTO admin_settings (id, daily_codes_limit, distribution_days, group_size, send_time, is_scheduler_active, max_groups, penalties_active)
+       VALUES (1, 50, 20, 1000, '09:00:00', $1, NULL, true) ON CONFLICT (id) DO NOTHING`,
       [false]
     );
   } catch (err) {
@@ -101,12 +101,12 @@ async function getAdminSettings() {
     await ensureAdminSettings();
     const res = await q(`SELECT * FROM admin_settings WHERE id = 1 LIMIT 1`);
     if (!res.rows || res.rows.length === 0) {
-      return { daily_codes_limit: 50, distribution_days: 20, group_size: 1000, send_time: "09:00:00", is_scheduler_active: false, max_groups: null };
+      return { daily_codes_limit: 50, distribution_days: 20, group_size: 1000, send_time: "09:00:00", is_scheduler_active: false, max_groups: null, penalties_active: true };
     }
     return res.rows[0];
   } catch (err) {
     console.error("❌ getAdminSettings error:", err.message);
-    return { daily_codes_limit: 50, distribution_days: 20, group_size: 1000, send_time: "09:00:00", is_scheduler_active: false, max_groups: null };
+    return { daily_codes_limit: 50, distribution_days: 20, group_size: 1000, send_time: "09:00:00", is_scheduler_active: false, max_groups: null, penalties_active: true };
   }
 }
 
@@ -124,7 +124,7 @@ async function getGroupSettings(groupId) {
 }
 
 async function updateAdminSettings(field, value) {
-  const allowedFields = ["daily_codes_limit", "distribution_days", "group_size", "send_time", "is_scheduler_active", "max_groups"];
+  const allowedFields = ["daily_codes_limit", "distribution_days", "group_size", "send_time", "is_scheduler_active", "max_groups", "penalties_active"];
   if (!allowedFields.includes(field)) throw new Error("Invalid field");
   await q(`UPDATE admin_settings SET ${field}=$1 WHERE id=1`, [value]);
 }
@@ -262,6 +262,14 @@ bot.on("contact", async (ctx) => {
     }
 
     const phone = contact.phone_number;
+    
+    // التحقق من القائمة السوداء
+    const blacklisted = await q("SELECT * FROM blacklist WHERE phone=$1 OR telegram_id=$2", [phone, tgId]);
+    if (blacklisted.rowCount > 0) {
+      delete userState[tgId];
+      return safeReply(ctx, `🚫 تم حظرك من استخدام البوت\n\n📋 السبب: ${blacklisted.rows[0].reason || 'غير محدد'}\n\n⚠️ للاستفسار تواصل مع الإدارة`);
+    }
+    
     const dupPhone = await q("SELECT id FROM users WHERE phone=$1", [phone]);
     const dupTelegram = await q("SELECT id FROM users WHERE telegram_id=$1", [tgId]);
     let dupBinance = { rowCount: 0 };
@@ -353,6 +361,7 @@ bot.command("admin", async (ctx) => {
   const keyboard = Markup.inlineKeyboard([
     [Markup.button.callback("🌐 Global Settings", "global_settings")],
     [Markup.button.callback("📦 Manage Groups", "manage_groups")],
+    [Markup.button.callback("🚫 Blacklist", "blacklist_menu")],
     [Markup.button.callback("🗑️ Delete Cycle Now", "delete_cycle")],
     [Markup.button.callback("📊 Stats", "stats")],
   ]);
@@ -425,6 +434,90 @@ bot.hears(/^\/set_group_chat_id/, async (ctx) => {
   } catch (err) {
     console.error(err);
     return safeReply(ctx, "❌ Error updating group");
+  }
+});
+
+bot.hears(/^\/ban /, async (ctx) => {
+  if (ctx.from.id.toString() !== ADMIN_ID) return;
+  const parts = ctx.message.text.split(" ");
+  if (parts.length < 2) return safeReply(ctx, "❌ Usage: /ban <phone> <reason>\n\nExample: /ban +201234567890 لم يدفع");
+  
+  const phone = parts[1];
+  const reason = parts.slice(2).join(" ") || "غير محدد";
+  
+  try {
+    await q(`INSERT INTO blacklist (phone, reason, banned_by) VALUES ($1, $2, $3) ON CONFLICT (phone) DO UPDATE SET reason=$2, banned_at=NOW()`, [phone, reason, ADMIN_ID]);
+    return safeReply(ctx, `✅ تم إضافة ${phone} للقائمة السوداء\n\n📋 السبب: ${reason}`);
+  } catch (err) {
+    console.error(err);
+    return safeReply(ctx, "❌ حدث خطأ");
+  }
+});
+
+bot.hears(/^\/unban /, async (ctx) => {
+  if (ctx.from.id.toString() !== ADMIN_ID) return;
+  const parts = ctx.message.text.split(" ");
+  if (parts.length < 2) return safeReply(ctx, "❌ Usage: /unban <phone_or_telegram_id>");
+  
+  const identifier = parts[1];
+  
+  try {
+    const result = await q(`DELETE FROM blacklist WHERE phone=$1 OR telegram_id=$1`, [identifier]);
+    if (result.rowCount > 0) {
+      return safeReply(ctx, `✅ تم إزالة ${identifier} من القائمة السوداء`);
+    } else {
+      return safeReply(ctx, `❌ ${identifier} غير موجود في القائمة السوداء`);
+    }
+  } catch (err) {
+    console.error(err);
+    return safeReply(ctx, "❌ حدث خطأ");
+  }
+});
+
+bot.hears(/^\/banuser /, async (ctx) => {
+  if (ctx.from.id.toString() !== ADMIN_ID) return;
+  const parts = ctx.message.text.split(" ");
+  if (parts.length < 2) return safeReply(ctx, "❌ Usage: /banuser <user_name_or_phone> <reason>\n\nExample: /banuser User5 غير نزيه");
+  
+  const identifier = parts[1];
+  const reason = parts.slice(2).join(" ") || "مخالفة القواعد";
+  
+  try {
+    const user = await q(`SELECT * FROM users WHERE auto_name=$1 OR phone=$1 OR telegram_id=$1`, [identifier]);
+    
+    if (user.rowCount === 0) {
+      return safeReply(ctx, `❌ المستخدم ${identifier} غير موجود`);
+    }
+    
+    const userData = user.rows[0];
+    
+    // 1. إضافة للقائمة السوداء
+    await q(`INSERT INTO blacklist (phone, telegram_id, reason, banned_by) VALUES ($1, $2, $3, $4) ON CONFLICT (phone) DO UPDATE SET reason=$3, banned_at=NOW()`, 
+      [userData.phone, userData.telegram_id, reason, ADMIN_ID]);
+    
+    // 2. حذف كل الأكواد
+    await q(`DELETE FROM codes WHERE owner_id=$1`, [userData.id]);
+    
+    // 3. حذف كل التوزيعات
+    await q(`DELETE FROM code_view_assignments WHERE assigned_to_user_id=$1`, [userData.id]);
+    
+    // 4. حذف العقوبات
+    await q(`DELETE FROM user_penalties WHERE user_id=$1`, [userData.id]);
+    
+    // 5. حذف المستخدم
+    await q(`DELETE FROM users WHERE id=$1`, [userData.id]);
+    
+    // 6. إرسال رسالة للمستخدم
+    try {
+      await bot.telegram.sendMessage(userData.telegram_id, `🚫 تم حظرك من البوت\n\n📋 السبب: ${reason}\n\n⚠️ تم حذف حسابك وجميع أكوادك\n❌ لن تتمكن من التسجيل مرة أخرى`);
+    } catch (e) {
+      console.log("Could not send ban message to user");
+    }
+    
+    return safeReply(ctx, `✅ تم حظر ${userData.auto_name} بنجاح\n\n📋 السبب: ${reason}\n🗑️ تم حذف الحساب والأكواد\n🚫 تم إضافته للقائمة السوداء`);
+  } catch (err) {
+    console.error(err);
+    return safeReply(ctx, "❌ حدث خطأ");
   }
 });
 
@@ -850,8 +943,10 @@ bot.on("callback_query", async (ctx) => {
 
   try {
     if (action === "global_settings") {
+      const s = await getAdminSettings();
       const keyboard = Markup.inlineKeyboard([
         [Markup.button.callback("📴 Toggle All Schedulers", "toggle_all_schedulers")],
+        [Markup.button.callback(`${s.penalties_active ? '🔴 Disable' : '🟢 Enable'} Penalties`, "toggle_penalties")],
         [Markup.button.callback("🔄 Distribute Now (All)", "distribute_now")],
         [Markup.button.callback("⏰ Set Send Time", "set_time")],
         [Markup.button.callback("👁️ Set Daily Limit", "set_limit")],
@@ -861,7 +956,7 @@ bot.on("callback_query", async (ctx) => {
         [Markup.button.callback("📢 Broadcast", "broadcast")],
         [Markup.button.callback("◀️ Back", "back_to_main")],
       ]);
-      await ctx.editMessageText("🌐 Global Settings (Apply to all groups):", { reply_markup: keyboard.reply_markup });
+      await ctx.editMessageText(`🌐 Global Settings\n\nPenalties System: ${s.penalties_active ? '✅ Active' : '❌ Inactive'}`, { reply_markup: keyboard.reply_markup });
       await ctx.answerCbQuery();
       return;
     }
@@ -1009,10 +1104,82 @@ bot.on("callback_query", async (ctx) => {
       return;
     }
     
+    if (action === "blacklist_menu") {
+      const keyboard = Markup.inlineKeyboard([
+        [Markup.button.callback("➕ Add to Blacklist", "blacklist_add")],
+        [Markup.button.callback("📋 View Blacklist", "blacklist_view")],
+        [Markup.button.callback("🗑️ Remove from Blacklist", "blacklist_remove")],
+        [Markup.button.callback("👤 Ban User", "blacklist_ban_user")],
+        [Markup.button.callback("◀️ Back", "back_to_main")],
+      ]);
+      await ctx.editMessageText("🚫 Blacklist Management:", { reply_markup: keyboard.reply_markup });
+      await ctx.answerCbQuery();
+      return;
+    }
+    
+    if (action === "blacklist_add") {
+      await safeReply(ctx, "➕ لإضافة للقائمة السوداء، استخدم:\n\n/ban <phone> <reason>\n\nمثال:\n/ban +201234567890 لم يدفع الاشتراك");
+      await ctx.answerCbQuery();
+      return;
+    }
+    
+    if (action === "blacklist_view") {
+      const blacklist = await q(`SELECT * FROM blacklist ORDER BY banned_at DESC LIMIT 20`);
+      if (blacklist.rowCount === 0) {
+        await ctx.answerCbQuery("القائمة السوداء فارغة");
+        return;
+      }
+      let message = "🚫 القائمة السوداء:\n\n";
+      blacklist.rows.forEach((item, i) => {
+        message += `${i + 1}. 📱 ${item.phone || 'N/A'}\n`;
+        message += `   🆔 ${item.telegram_id || 'N/A'}\n`;
+        message += `   📋 ${item.reason || 'غير محدد'}\n`;
+        message += `   📅 ${new Date(item.banned_at).toLocaleDateString('ar-EG')}\n\n`;
+      });
+      await safeReply(ctx, message);
+      await ctx.answerCbQuery();
+      return;
+    }
+    
+    if (action === "blacklist_remove") {
+      await safeReply(ctx, "🗑️ لإزالة من القائمة السوداء، استخدم:\n\n/unban <phone_or_telegram_id>\n\nمثال:\n/unban +201234567890");
+      await ctx.answerCbQuery();
+      return;
+    }
+    
+    if (action === "blacklist_ban_user") {
+      await safeReply(ctx, "👤 لحظر مستخدم مسجل، استخدم:\n\n/banuser <user_name_or_phone> <reason>\n\nمثال:\n/banuser User5 غير نزيه في الاستخدام\n\nسيتم:\n✅ حذف حسابه\n✅ إضافته للقائمة السوداء\n✅ منعه من التسجيل مرة أخرى");
+      await ctx.answerCbQuery();
+      return;
+    }
+    
+    if (action === "toggle_penalties") {
+      const s = await getAdminSettings();
+      await updateAdminSettings("penalties_active", !s.penalties_active);
+      await ctx.answerCbQuery(`✅ Penalties ${!s.penalties_active ? 'Enabled' : 'Disabled'}`);
+      
+      const updated = await getAdminSettings();
+      const keyboard = Markup.inlineKeyboard([
+        [Markup.button.callback("📴 Toggle All Schedulers", "toggle_all_schedulers")],
+        [Markup.button.callback(`${updated.penalties_active ? '🔴 Disable' : '🟢 Enable'} Penalties`, "toggle_penalties")],
+        [Markup.button.callback("🔄 Distribute Now (All)", "distribute_now")],
+        [Markup.button.callback("⏰ Set Send Time", "set_time")],
+        [Markup.button.callback("👁️ Set Daily Limit", "set_limit")],
+        [Markup.button.callback("📅 Set Days", "set_days")],
+        [Markup.button.callback("👥 Set Group Size", "set_group")],
+        [Markup.button.callback("🔢 Set Max Groups", "set_max_groups")],
+        [Markup.button.callback("📢 Broadcast", "broadcast")],
+        [Markup.button.callback("◀️ Back", "back_to_main")],
+      ]);
+      await ctx.editMessageText(`🌐 Global Settings\n\nPenalties System: ${updated.penalties_active ? '✅ Active' : '❌ Inactive'}`, { reply_markup: keyboard.reply_markup });
+      return;
+    }
+    
     if (action === "back_to_main") {
       const keyboard = Markup.inlineKeyboard([
         [Markup.button.callback("🌐 Global Settings", "global_settings")],
         [Markup.button.callback("📦 Manage Groups", "manage_groups")],
+        [Markup.button.callback("🚫 Blacklist", "blacklist_menu")],
         [Markup.button.callback("🗑️ Delete Cycle Now", "delete_cycle")],
         [Markup.button.callback("📊 Stats", "stats")],
       ]);
@@ -1047,8 +1214,9 @@ bot.on("callback_query", async (ctx) => {
       const u = await q(`SELECT COUNT(*) FROM users`);
       const c = await q(`SELECT COUNT(*) FROM codes WHERE status='active'`);
       const g = await q(`SELECT COUNT(*) FROM groups`);
+      const bl = await q(`SELECT COUNT(*) FROM blacklist`);
       const s = await getAdminSettings();
-      await safeReply(ctx, `📊 Stats:\n\nUsers: ${u.rows[0].count}\nActive Codes: ${c.rows[0].count}\nGroups: ${g.rows[0].count}\nMax Groups: ${s.max_groups || 'Unlimited'}\nScheduler: ${s.is_scheduler_active ? "On" : "Off"}\n\n💡 Tip: Users can now send payment proofs via "📸 إرسال إثبات الدفع" button`);
+      await safeReply(ctx, `📊 Stats:\n\nUsers: ${u.rows[0].count}\nActive Codes: ${c.rows[0].count}\nGroups: ${g.rows[0].count}\nBlacklisted: ${bl.rows[0].count}\nMax Groups: ${s.max_groups || 'Unlimited'}\nScheduler: ${s.is_scheduler_active ? "On" : "Off"}\nPenalties: ${s.penalties_active ? "On" : "Off"}\n\n💡 Tip: Use /banuser to ban users`);
     }
     await ctx.answerCbQuery();
   } catch (err) {
