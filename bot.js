@@ -112,14 +112,14 @@ async function getAdminSettings() {
 
 async function getGroupSettings(groupId) {
   try {
-    const res = await q(`SELECT daily_codes_limit, distribution_days, send_time, is_scheduler_active FROM groups WHERE id=$1`, [groupId]);
+    const res = await q(`SELECT daily_codes_limit, distribution_days, send_time, is_scheduler_active, payment_day FROM groups WHERE id=$1`, [groupId]);
     if (res.rowCount > 0) {
       return res.rows[0];
     }
-    return { daily_codes_limit: 50, distribution_days: 20, send_time: "09:00:00", is_scheduler_active: false };
+    return { daily_codes_limit: 50, distribution_days: 20, send_time: "09:00:00", is_scheduler_active: false, payment_day: 1 };
   } catch (err) {
     console.error("❌ getGroupSettings error:", err.message);
-    return { daily_codes_limit: 50, distribution_days: 20, send_time: "09:00:00", is_scheduler_active: false };
+    return { daily_codes_limit: 50, distribution_days: 20, send_time: "09:00:00", is_scheduler_active: false, payment_day: 1 };
   }
 }
 
@@ -130,7 +130,7 @@ async function updateAdminSettings(field, value) {
 }
 
 async function updateGroupSettings(groupId, field, value) {
-  const allowedFields = ["daily_codes_limit", "distribution_days", "send_time", "is_scheduler_active"];
+  const allowedFields = ["daily_codes_limit", "distribution_days", "send_time", "is_scheduler_active", "payment_day"];
   if (!allowedFields.includes(field)) throw new Error("Invalid field");
   await q(`UPDATE groups SET ${field}=$1 WHERE id=$2`, [value, groupId]);
 }
@@ -329,9 +329,24 @@ bot.on("photo", async (ctx) => {
     const user = userRes.rows[0];
     const groupId = user.group_id;
     const userName = user.auto_name;
+    const userId = user.id;
     
     const photo = ctx.message.photo[ctx.message.photo.length - 1];
     const caption = ctx.message.caption || "";
+    
+    // تسجيل إثبات الدفع
+    const currentMonth = new Date().toISOString().slice(0, 7); // 2025-01
+    try {
+      await q(
+        `INSERT INTO payments (user_id, group_id, payment_month, proof_sent, proof_sent_at) 
+         VALUES ($1, $2, $3, true, NOW()) 
+         ON CONFLICT (user_id, payment_month) 
+         DO UPDATE SET proof_sent=true, proof_sent_at=NOW()`,
+        [userId, groupId, currentMonth]
+      );
+    } catch (err) {
+      console.log("Payment tracking error:", err.message);
+    }
     
     try {
       await bot.telegram.sendPhoto(ADMIN_ID, photo.file_id, {
@@ -339,6 +354,7 @@ bot.on("photo", async (ctx) => {
                  `👤 المستخدم: ${userName}\n` +
                  `🆔 Group: ${groupId.toString().slice(0, 8)}\n` +
                  `📱 Telegram ID: ${tgId}\n` +
+                 `📅 الشهر: ${currentMonth}\n` +
                  `💬 الرسالة: ${caption || 'لا توجد رسالة'}`,
         parse_mode: 'HTML'
       });
@@ -361,6 +377,7 @@ bot.command("admin", async (ctx) => {
   const keyboard = Markup.inlineKeyboard([
     [Markup.button.callback("🌐 Global Settings", "global_settings")],
     [Markup.button.callback("📦 Manage Groups", "manage_groups")],
+    [Markup.button.callback("💰 Payment Management", "payment_menu")],
     [Markup.button.callback("🚫 Blacklist", "blacklist_menu")],
     [Markup.button.callback("🗑️ Delete Cycle Now", "delete_cycle")],
     [Markup.button.callback("📊 Stats", "stats")],
@@ -504,10 +521,13 @@ bot.hears(/^\/banuser /, async (ctx) => {
     // 4. حذف العقوبات
     await q(`DELETE FROM user_penalties WHERE user_id=$1`, [userData.id]);
     
-    // 5. حذف المستخدم
+    // 5. حذف سجلات الدفع
+    await q(`DELETE FROM payments WHERE user_id=$1`, [userData.id]);
+    
+    // 6. حذف المستخدم
     await q(`DELETE FROM users WHERE id=$1`, [userData.id]);
     
-    // 6. إرسال رسالة للمستخدم
+    // 7. إرسال رسالة للمستخدم
     try {
       await bot.telegram.sendMessage(userData.telegram_id, `🚫 تم حظرك من البوت\n\n📋 السبب: ${reason}\n\n⚠️ تم حذف حسابك وجميع أكوادك\n❌ لن تتمكن من التسجيل مرة أخرى`);
     } catch (e) {
@@ -518,6 +538,72 @@ bot.hears(/^\/banuser /, async (ctx) => {
   } catch (err) {
     console.error(err);
     return safeReply(ctx, "❌ حدث خطأ");
+  }
+});
+
+bot.hears(/^\/warn_nonpayers/, async (ctx) => {
+  if (ctx.from.id.toString() !== ADMIN_ID) return;
+  
+  try {
+    const currentMonth = new Date().toISOString().slice(0, 7);
+    const nonPayers = await q(`
+      SELECT u.telegram_id, u.auto_name
+      FROM users u
+      LEFT JOIN payments p ON p.user_id = u.id AND p.payment_month = $1
+      WHERE p.id IS NULL OR p.proof_sent = false
+    `, [currentMonth]);
+    
+    if (nonPayers.rowCount === 0) {
+      return safeReply(ctx, "✅ الجميع دفع!");
+    }
+    
+    let success = 0;
+    for (const user of nonPayers.rows) {
+      try {
+        await bot.telegram.sendMessage(user.telegram_id, 
+          `⚠️ تحذير نهائي - عدم الدفع\n\n` +
+          `👤 ${user.auto_name}\n` +
+          `📅 الشهر: ${currentMonth}\n\n` +
+          `🚨 لم نستلم إثبات الدفع منك حتى الآن\n\n` +
+          `📸 يرجى إرسال إثبات الدفع فوراً عبر زر "📸 إرسال إثبات الدفع"\n\n` +
+          `⛔ عدم الدفع خلال 24 ساعة سيؤدي لحظر حسابك نهائياً`
+        );
+        success++;
+        await new Promise(r => setTimeout(r, 100));
+      } catch (e) {
+        console.error(`Failed to warn ${user.telegram_id}`);
+      }
+    }
+    
+    return safeReply(ctx, `✅ تم إرسال التحذير لـ ${success} مستخدم`);
+  } catch (err) {
+    console.error(err);
+    return safeReply(ctx, "❌ حدث خطأ");
+  }
+});
+
+bot.hears(/^\/set_payment_day/, async (ctx) => {
+  if (ctx.from.id.toString() !== ADMIN_ID) return;
+  const parts = ctx.message.text.split(" ");
+  if (parts.length < 3) return safeReply(ctx, "❌ Usage: /set_payment_day <group_id_prefix> <day>\n\nExample: /set_payment_day 5d124af3 15");
+  
+  const groupPrefix = parts[1];
+  const day = parseInt(parts[2], 10);
+  
+  if (isNaN(day) || day < 1 || day > 28) {
+    return safeReply(ctx, "❌ اليوم يجب أن يكون بين 1 و 28");
+  }
+  
+  try {
+    const groups = await q(`SELECT id FROM groups WHERE id::text LIKE $1`, [`${groupPrefix}%`]);
+    if (groups.rowCount === 0) return safeReply(ctx, "❌ Group not found");
+    
+    const groupId = groups.rows[0].id;
+    await updateGroupSettings(groupId, 'payment_day', day);
+    return safeReply(ctx, `✅ تم تحديد يوم الدفع إلى ${day} للمجموعة ${groupId.slice(0, 8)}`);
+  } catch (err) {
+    console.error(err);
+    return safeReply(ctx, "❌ Error updating group");
   }
 });
 
@@ -1104,6 +1190,212 @@ bot.on("callback_query", async (ctx) => {
       return;
     }
     
+    if (action === "payment_menu") {
+      const keyboard = Markup.inlineKeyboard([
+        [Markup.button.callback("📢 Send Payment Reminder (All)", "payment_remind_all")],
+        [Markup.button.callback("📋 Check Payment Status", "payment_status")],
+        [Markup.button.callback("⚠️ Non-Payers List", "payment_nonpayers")],
+        [Markup.button.callback("📦 Group Payment Settings", "payment_groups")],
+        [Markup.button.callback("◀️ Back", "back_to_main")],
+      ]);
+      await ctx.editMessageText("💰 Payment Management:", { reply_markup: keyboard.reply_markup });
+      await ctx.answerCbQuery();
+      return;
+    }
+    
+    if (action === "payment_remind_all") {
+      try {
+        const currentMonth = new Date().toISOString().slice(0, 7);
+        const users = await q(`SELECT u.telegram_id, u.auto_name, u.group_id FROM users u`);
+        
+        let success = 0;
+        for (const user of users.rows) {
+          try {
+            await bot.telegram.sendMessage(user.telegram_id, 
+              `💰 تذكير دفع الاشتراك الشهري\n\n` +
+              `📅 الشهر: ${currentMonth}\n` +
+              `👤 ${user.auto_name}\n\n` +
+              `📸 يرجى إرسال إثبات الدفع عبر زر "📸 إرسال إثبات الدفع"\n\n` +
+              `⚠️ عدم الدفع خلال يومين سيؤدي لتحذير نهائي`
+            );
+            success++;
+            await new Promise(r => setTimeout(r, 100));
+          } catch (e) {
+            console.error(`Failed to send to ${user.telegram_id}`);
+          }
+        }
+        
+        await q(`UPDATE groups SET last_payment_reminder=NOW()`);
+        await safeReply(ctx, `✅ تم إرسال التذكير لـ ${success} مستخدم`);
+        await ctx.answerCbQuery();
+      } catch (err) {
+        console.error(err);
+        await ctx.answerCbQuery("❌ Error");
+      }
+      return;
+    }
+    
+    if (action === "payment_status") {
+      try {
+        const currentMonth = new Date().toISOString().slice(0, 7);
+        const total = await q(`SELECT COUNT(*) FROM users`);
+        const paid = await q(`SELECT COUNT(*) FROM payments WHERE payment_month=$1 AND proof_sent=true`, [currentMonth]);
+        
+        const groups = await q(`
+          SELECT g.id, g.name, 
+                 COUNT(u.id) as total_users,
+                 COUNT(p.id) FILTER (WHERE p.proof_sent=true) as paid_users
+          FROM groups g
+          LEFT JOIN users u ON u.group_id = g.id
+          LEFT JOIN payments p ON p.user_id = u.id AND p.payment_month = $1
+          GROUP BY g.id, g.name
+          ORDER BY g.created_at
+        `, [currentMonth]);
+        
+        let message = `💰 حالة الدفع - ${currentMonth}\n\n`;
+        message += `📊 الإجمالي: ${paid.rows[0].count}/${total.rows[0].count} دفعوا\n\n`;
+        message += `📦 حسب المجموعات:\n\n`;
+        
+        groups.rows.forEach(g => {
+          const paidCount = parseInt(g.paid_users) || 0;
+          const totalCount = parseInt(g.total_users) || 0;
+          const percentage = totalCount > 0 ? Math.round((paidCount / totalCount) * 100) : 0;
+          message += `• Group ${g.id.toString().slice(0, 8)}: ${paidCount}/${totalCount} (${percentage}%)\n`;
+        });
+        
+        await safeReply(ctx, message);
+        await ctx.answerCbQuery();
+      } catch (err) {
+        console.error(err);
+        await ctx.answerCbQuery("❌ Error");
+      }
+      return;
+    }
+    
+    if (action === "payment_nonpayers") {
+      try {
+        const currentMonth = new Date().toISOString().slice(0, 7);
+        const nonPayers = await q(`
+          SELECT u.id, u.auto_name, u.telegram_id, u.group_id, u.phone
+          FROM users u
+          LEFT JOIN payments p ON p.user_id = u.id AND p.payment_month = $1
+          WHERE p.id IS NULL OR p.proof_sent = false
+          ORDER BY u.group_id, u.auto_name
+        `, [currentMonth]);
+        
+        if (nonPayers.rowCount === 0) {
+          await ctx.answerCbQuery("✅ الجميع دفع!");
+          return;
+        }
+        
+        let message = `⚠️ قائمة من لم يدفع - ${currentMonth}\n`;
+        message += `📊 العدد: ${nonPayers.rowCount}\n\n`;
+        
+        const byGroup = {};
+        nonPayers.rows.forEach(u => {
+          const gid = u.group_id.toString().slice(0, 8);
+          if (!byGroup[gid]) byGroup[gid] = [];
+          byGroup[gid].push(u);
+        });
+        
+        for (const [gid, users] of Object.entries(byGroup)) {
+          message += `📦 Group ${gid}:\n`;
+          users.forEach(u => {
+            message += `  • ${u.auto_name} (${u.phone || 'N/A'})\n`;
+          });
+          message += `\n`;
+        }
+        
+        message += `━━━━━━━━━━━━━━\n\n`;
+        message += `استخدم:\n`;
+        message += `/warn_nonpayers - تحذير الجميع\n`;
+        message += `/banuser <name> سبب - حظر مستخدم`;
+        
+        await safeReply(ctx, message);
+        await ctx.answerCbQuery();
+      } catch (err) {
+        console.error(err);
+        await ctx.answerCbQuery("❌ Error");
+      }
+      return;
+    }
+    
+    if (action === "payment_groups") {
+      const groups = await q(`SELECT id, name, payment_day FROM groups ORDER BY created_at`);
+      if (groups.rowCount === 0) {
+        await ctx.answerCbQuery("لا توجد مجموعات");
+        return;
+      }
+      const keyboard = groups.rows.map(g => [
+        Markup.button.callback(`Group ${g.id.toString().slice(0, 8)} (Day: ${g.payment_day || 1})`, `payment_group_${g.id}`)
+      ]);
+      keyboard.push([Markup.button.callback("◀️ Back", "payment_menu")]);
+      await ctx.editMessageText("📦 اختر مجموعة لإدارة الدفع:", { reply_markup: { inline_keyboard: keyboard } });
+      await ctx.answerCbQuery();
+      return;
+    }
+    
+    if (action.startsWith("payment_group_")) {
+      const groupId = action.replace("payment_group_", "");
+      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (!uuidRegex.test(groupId)) {
+        await ctx.answerCbQuery("❌ Invalid group ID");
+        return;
+      }
+      
+      const g = await q(`SELECT payment_day FROM groups WHERE id=$1`, [groupId]);
+      if (g.rowCount > 0) {
+        const keyboard = Markup.inlineKeyboard([
+          [Markup.button.callback("📢 Send Payment Reminder", `payment_remind_group_${groupId}`)],
+          [Markup.button.callback(`📅 Set Payment Day (${g.rows[0].payment_day})`, `payment_setday_${groupId}`)],
+          [Markup.button.callback("◀️ Back", "payment_groups")],
+        ]);
+        await ctx.editMessageText(`💰 Payment Settings - Group ${groupId.slice(0, 8)}\n\nPayment Day: ${g.rows[0].payment_day}`, { reply_markup: keyboard.reply_markup });
+        await ctx.answerCbQuery();
+      }
+      return;
+    }
+    
+    if (action.startsWith("payment_remind_group_")) {
+      const groupId = action.replace("payment_remind_group_", "");
+      try {
+        const currentMonth = new Date().toISOString().slice(0, 7);
+        const users = await q(`SELECT telegram_id, auto_name FROM users WHERE group_id=$1`, [groupId]);
+        
+        let success = 0;
+        for (const user of users.rows) {
+          try {
+            await bot.telegram.sendMessage(user.telegram_id, 
+              `💰 تذكير دفع الاشتراك الشهري\n\n` +
+              `📅 الشهر: ${currentMonth}\n` +
+              `👤 ${user.auto_name}\n\n` +
+              `📸 يرجى إرسال إثبات الدفع عبر زر "📸 إرسال إثبات الدفع"\n\n` +
+              `⚠️ عدم الدفع خلال يومين سيؤدي لتحذير نهائي`
+            );
+            success++;
+            await new Promise(r => setTimeout(r, 100));
+          } catch (e) {
+            console.error(`Failed to send to ${user.telegram_id}`);
+          }
+        }
+        
+        await q(`UPDATE groups SET last_payment_reminder=NOW() WHERE id=$1`, [groupId]);
+        await safeReply(ctx, `✅ تم إرسال التذكير لـ ${success} مستخدم في Group ${groupId.slice(0, 8)}`);
+        await ctx.answerCbQuery();
+      } catch (err) {
+        console.error(err);
+        await ctx.answerCbQuery("❌ Error");
+      }
+      return;
+    }
+    
+    if (action.startsWith("payment_setday_")) {
+      const groupId = action.replace("payment_setday_", "");
+      await safeReply(ctx, `📅 لتحديد يوم الدفع، استخدم:\n\n/set_payment_day ${groupId.slice(0, 8)} 15\n\nمثال: /set_payment_day ${groupId.slice(0, 8)} 1`);
+      await ctx.answerCbQuery();
+      return;
+    }
+    
     if (action === "blacklist_menu") {
       const keyboard = Markup.inlineKeyboard([
         [Markup.button.callback("➕ Add to Blacklist", "blacklist_add")],
@@ -1179,6 +1471,7 @@ bot.on("callback_query", async (ctx) => {
       const keyboard = Markup.inlineKeyboard([
         [Markup.button.callback("🌐 Global Settings", "global_settings")],
         [Markup.button.callback("📦 Manage Groups", "manage_groups")],
+        [Markup.button.callback("💰 Payment Management", "payment_menu")],
         [Markup.button.callback("🚫 Blacklist", "blacklist_menu")],
         [Markup.button.callback("🗑️ Delete Cycle Now", "delete_cycle")],
         [Markup.button.callback("📊 Stats", "stats")],
@@ -1659,6 +1952,106 @@ cron.schedule("0 21 * * *", async () => {
     console.log(`✅ Sent daily reports to ${groups.rowCount} groups`);
   } catch (err) {
     console.error("❌ Daily group report error:", err);
+  }
+});
+
+// 8️⃣ تحقق تلقائي من الدفعات (كل يوم الساعة 10 صباحاً)
+cron.schedule("0 10 * * *", async () => {
+  try {
+    console.log("💰 Checking payment reminders...");
+    const groups = await q(`SELECT id, payment_day, last_payment_reminder FROM groups`);
+    const now = new Date();
+    const currentDay = now.getDate();
+    const currentMonth = now.toISOString().slice(0, 7);
+    
+    for (const group of groups.rows) {
+      const paymentDay = group.payment_day || 1;
+      
+      // إرسال التذكير في يوم الدفع
+      if (currentDay === paymentDay) {
+        const lastReminder = group.last_payment_reminder ? new Date(group.last_payment_reminder) : null;
+        const sameMonth = lastReminder && lastReminder.toISOString().slice(0, 7) === currentMonth;
+        
+        if (!sameMonth) {
+          console.log(`📢 Sending payment reminder for group ${group.id}`);
+          const users = await q(`SELECT telegram_id, auto_name FROM users WHERE group_id=$1`, [group.id]);
+          
+          let success = 0;
+          for (const user of users.rows) {
+            try {
+              await bot.telegram.sendMessage(user.telegram_id, 
+                `💰 تذكير دفع الاشتراك الشهري\n\n` +
+                `📅 الشهر: ${currentMonth}\n` +
+                `👤 ${user.auto_name}\n\n` +
+                `📸 يرجى إرسال إثبات الدفع عبر زر "📸 إرسال إثبات الدفع"\n\n` +
+                `⚠️ عدم الدفع خلال يومين سيؤدي لتحذير نهائي`
+              );
+              success++;
+              await new Promise(r => setTimeout(r, 100));
+            } catch (e) {
+              console.error(`Failed to send payment reminder to ${user.telegram_id}`);
+            }
+          }
+          
+          await q(`UPDATE groups SET last_payment_reminder=NOW() WHERE id=$1`, [group.id]);
+          console.log(`✅ Sent payment reminder to ${success} users in group ${group.id}`);
+        }
+      }
+      
+      // تحذير بعد يومين
+      const twoDaysAfter = (paymentDay + 2) > 28 ? (paymentDay + 2 - 28) : (paymentDay + 2);
+      if (currentDay === twoDaysAfter) {
+        console.log(`⚠️ Checking non-payers for group ${group.id}`);
+        const nonPayers = await q(`
+          SELECT u.id, u.telegram_id, u.auto_name, u.phone
+          FROM users u
+          LEFT JOIN payments p ON p.user_id = u.id AND p.payment_month = $1
+          WHERE u.group_id = $2 AND (p.id IS NULL OR p.proof_sent = false)
+        `, [currentMonth, group.id]);
+        
+        if (nonPayers.rowCount > 0) {
+          // إرسال تحذير للمستخدمين
+          for (const user of nonPayers.rows) {
+            try {
+              await bot.telegram.sendMessage(user.telegram_id, 
+                `⚠️ تحذير نهائي - عدم الدفع\n\n` +
+                `👤 ${user.auto_name}\n` +
+                `📅 الشهر: ${currentMonth}\n\n` +
+                `🚨 لم نستلم إثبات الدفع منك حتى الآن\n\n` +
+                `📸 يرجى إرسال إثبات الدفع فوراً عبر زر "📸 إرسال إثبات الدفع"\n\n` +
+                `⛔ عدم الدفع قد يؤدي لحظر حسابك`
+              );
+              await new Promise(r => setTimeout(r, 100));
+            } catch (e) {
+              console.error(`Failed to warn ${user.telegram_id}`);
+            }
+          }
+          
+          // إرسال قائمة للأدمن
+          let adminMsg = `⚠️ قائمة من لم يدفع - Group ${group.id.toString().slice(0, 8)}\n`;
+          adminMsg += `📅 الشهر: ${currentMonth}\n`;
+          adminMsg += `📊 العدد: ${nonPayers.rowCount}\n\n`;
+          
+          nonPayers.rows.forEach(u => {
+            adminMsg += `• ${u.auto_name} (${u.phone || 'N/A'})\n`;
+          });
+          
+          adminMsg += `\n━━━━━━━━━━━━━━\n\n`;
+          adminMsg += `استخدم:\n`;
+          adminMsg += `/banuser <name> عدم الدفع - لحظر مستخدم\n`;
+          adminMsg += `/warn_nonpayers - لإرسال تحذير إضافي`;
+          
+          try {
+            await bot.telegram.sendMessage(ADMIN_ID, adminMsg);
+            console.log(`✅ Sent non-payers list to admin for group ${group.id}`);
+          } catch (e) {
+            console.error("Failed to send non-payers list to admin");
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.error("❌ Payment reminder error:", err);
   }
 });
 
