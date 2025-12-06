@@ -112,14 +112,14 @@ async function getAdminSettings() {
 
 async function getGroupSettings(groupId) {
   try {
-    const res = await q(`SELECT daily_codes_limit, distribution_days, send_time, is_scheduler_active, payment_day FROM groups WHERE id=$1`, [groupId]);
+    const res = await q(`SELECT daily_codes_limit, distribution_days, send_time, is_scheduler_active, payment_day, payment_mode_active, payment_mode_started, payment_mode_day FROM groups WHERE id=$1`, [groupId]);
     if (res.rowCount > 0) {
       return res.rows[0];
     }
-    return { daily_codes_limit: 50, distribution_days: 20, send_time: "09:00:00", is_scheduler_active: false, payment_day: 1 };
+    return { daily_codes_limit: 50, distribution_days: 20, send_time: "09:00:00", is_scheduler_active: false, payment_day: 1, payment_mode_active: false, payment_mode_started: null, payment_mode_day: 0 };
   } catch (err) {
     console.error("❌ getGroupSettings error:", err.message);
-    return { daily_codes_limit: 50, distribution_days: 20, send_time: "09:00:00", is_scheduler_active: false, payment_day: 1 };
+    return { daily_codes_limit: 50, distribution_days: 20, send_time: "09:00:00", is_scheduler_active: false, payment_day: 1, payment_mode_active: false, payment_mode_started: null, payment_mode_day: 0 };
   }
 }
 
@@ -130,7 +130,7 @@ async function updateAdminSettings(field, value) {
 }
 
 async function updateGroupSettings(groupId, field, value) {
-  const allowedFields = ["daily_codes_limit", "distribution_days", "send_time", "is_scheduler_active", "payment_day"];
+  const allowedFields = ["daily_codes_limit", "distribution_days", "send_time", "is_scheduler_active", "payment_day", "payment_mode_active", "payment_mode_started", "payment_mode_day"];
   if (!allowedFields.includes(field)) throw new Error("Invalid field");
   await q(`UPDATE groups SET ${field}=$1 WHERE id=$2`, [value, groupId]);
 }
@@ -828,6 +828,22 @@ bot.on("text", async (ctx) => {
       const groupId = u.rows[0].group_id;
       
       const groupSettings = await getGroupSettings(groupId);
+      
+      // التحقق من وضع الدفع
+      if (groupSettings.payment_mode_active) {
+        const currentMonth = new Date().toISOString().slice(0, 7);
+        const userPayment = await q(`SELECT proof_sent FROM payments WHERE user_id=$1 AND payment_month=$2`, [userId, currentMonth]);
+        
+        if (userPayment.rowCount === 0 || !userPayment.rows[0].proof_sent) {
+          return safeReply(ctx, 
+            `💰 وضع الدفع نشط\n\n` +
+            `⏸️ التوزيع متوقف حالياً لحين استكمال الدفعات\n\n` +
+            `📸 يرجى إرسال إثبات الدفع عبر زر "📸 إرسال إثبات الدفع"\n\n` +
+            `⚠️ بعد إرسال الإثبات، سيتم استئناف التوزيع تلقائياً`
+          );
+        }
+      }
+      
       if (!groupSettings.is_scheduler_active) {
         return safeReply(ctx, "⏸️ التوزيع متوقف حالياً من قبل الأدمن.\n\نسيتم استئناف التوزيع عند إعادة التفعيل.");
       }
@@ -1193,6 +1209,7 @@ bot.on("callback_query", async (ctx) => {
     if (action === "payment_menu") {
       const keyboard = Markup.inlineKeyboard([
         [Markup.button.callback("📢 Send Payment Reminder (All)", "payment_remind_all")],
+        [Markup.button.callback("▶️ Resume Distribution (All)", "payment_resume_all")],
         [Markup.button.callback("📋 Check Payment Status", "payment_status")],
         [Markup.button.callback("⚠️ Non-Payers List", "payment_nonpayers")],
         [Markup.button.callback("📦 Group Payment Settings", "payment_groups")],
@@ -1203,10 +1220,25 @@ bot.on("callback_query", async (ctx) => {
       return;
     }
     
+    if (action === "payment_resume_all") {
+      try {
+        await q(`UPDATE groups SET payment_mode_active=false, payment_mode_day=0, is_scheduler_active=true`);
+        await safeReply(ctx, `✅ تم استئناف التوزيع لجميع المجموعات\n\n▶️ التوزيع الآن نشط`);
+        await ctx.answerCbQuery();
+      } catch (err) {
+        console.error(err);
+        await ctx.answerCbQuery("❌ Error");
+      }
+      return;
+    }
+    
     if (action === "payment_remind_all") {
       try {
         const currentMonth = new Date().toISOString().slice(0, 7);
         const users = await q(`SELECT u.telegram_id, u.auto_name, u.group_id FROM users u`);
+        
+        // تفعيل وضع الدفع لكل المجموعات
+        await q(`UPDATE groups SET payment_mode_active=true, payment_mode_started=NOW(), payment_mode_day=1, is_scheduler_active=false`);
         
         let success = 0;
         for (const user of users.rows) {
@@ -1215,8 +1247,10 @@ bot.on("callback_query", async (ctx) => {
               `💰 تذكير دفع الاشتراك الشهري\n\n` +
               `📅 الشهر: ${currentMonth}\n` +
               `👤 ${user.auto_name}\n\n` +
+              `⏸️ تم إيقاف توزيع الأكواد مؤقتاً\n\n` +
               `📸 يرجى إرسال إثبات الدفع عبر زر "📸 إرسال إثبات الدفع"\n\n` +
-              `⚠️ عدم الدفع خلال يومين سيؤدي لتحذير نهائي`
+              `⚠️ لديك 3 أيام لإرسال الإثبات\n` +
+              `⏰ عدم الدفع خلال 3 أيام = حظر نهائي`
             );
             success++;
             await new Promise(r => setTimeout(r, 100));
@@ -1226,7 +1260,7 @@ bot.on("callback_query", async (ctx) => {
         }
         
         await q(`UPDATE groups SET last_payment_reminder=NOW()`);
-        await safeReply(ctx, `✅ تم إرسال التذكير لـ ${success} مستخدم`);
+        await safeReply(ctx, `✅ تم إرسال التذكير لـ ${success} مستخدم\n\n⏸️ تم إيقاف التوزيع لجميع المجموعات`);
         await ctx.answerCbQuery();
       } catch (err) {
         console.error(err);
@@ -1343,15 +1377,30 @@ bot.on("callback_query", async (ctx) => {
         return;
       }
       
-      const g = await q(`SELECT payment_day FROM groups WHERE id=$1`, [groupId]);
+      const g = await q(`SELECT payment_day, payment_mode_active FROM groups WHERE id=$1`, [groupId]);
       if (g.rowCount > 0) {
         const keyboard = Markup.inlineKeyboard([
           [Markup.button.callback("📢 Send Payment Reminder", `payment_remind_group_${groupId}`)],
+          [Markup.button.callback(`▶️ Resume Distribution`, `payment_resume_group_${groupId}`)],
           [Markup.button.callback(`📅 Set Payment Day (${g.rows[0].payment_day})`, `payment_setday_${groupId}`)],
           [Markup.button.callback("◀️ Back", "payment_groups")],
         ]);
-        await ctx.editMessageText(`💰 Payment Settings - Group ${groupId.slice(0, 8)}\n\nPayment Day: ${g.rows[0].payment_day}`, { reply_markup: keyboard.reply_markup });
+        const status = g.rows[0].payment_mode_active ? "⏸️ Paused" : "▶️ Active";
+        await ctx.editMessageText(`💰 Payment Settings - Group ${groupId.slice(0, 8)}\n\nPayment Day: ${g.rows[0].payment_day}\nDistribution: ${status}`, { reply_markup: keyboard.reply_markup });
         await ctx.answerCbQuery();
+      }
+      return;
+    }
+    
+    if (action.startsWith("payment_resume_group_")) {
+      const groupId = action.replace("payment_resume_group_", "");
+      try {
+        await q(`UPDATE groups SET payment_mode_active=false, payment_mode_day=0, is_scheduler_active=true WHERE id=$1`, [groupId]);
+        await safeReply(ctx, `✅ تم استئناف التوزيع للمجموعة ${groupId.slice(0, 8)}\n\n▶️ التوزيع الآن نشط`);
+        await ctx.answerCbQuery();
+      } catch (err) {
+        console.error(err);
+        await ctx.answerCbQuery("❌ Error");
       }
       return;
     }
@@ -1362,6 +1411,9 @@ bot.on("callback_query", async (ctx) => {
         const currentMonth = new Date().toISOString().slice(0, 7);
         const users = await q(`SELECT telegram_id, auto_name FROM users WHERE group_id=$1`, [groupId]);
         
+        // تفعيل وضع الدفع لهذه المجموعة فقط
+        await q(`UPDATE groups SET payment_mode_active=true, payment_mode_started=NOW(), payment_mode_day=1, is_scheduler_active=false WHERE id=$1`, [groupId]);
+        
         let success = 0;
         for (const user of users.rows) {
           try {
@@ -1369,8 +1421,10 @@ bot.on("callback_query", async (ctx) => {
               `💰 تذكير دفع الاشتراك الشهري\n\n` +
               `📅 الشهر: ${currentMonth}\n` +
               `👤 ${user.auto_name}\n\n` +
+              `⏸️ تم إيقاف توزيع الأكواد مؤقتاً\n\n` +
               `📸 يرجى إرسال إثبات الدفع عبر زر "📸 إرسال إثبات الدفع"\n\n` +
-              `⚠️ عدم الدفع خلال يومين سيؤدي لتحذير نهائي`
+              `⚠️ لديك 3 أيام لإرسال الإثبات\n` +
+              `⏰ عدم الدفع خلال 3 أيام = حظر نهائي`
             );
             success++;
             await new Promise(r => setTimeout(r, 100));
@@ -1380,7 +1434,7 @@ bot.on("callback_query", async (ctx) => {
         }
         
         await q(`UPDATE groups SET last_payment_reminder=NOW() WHERE id=$1`, [groupId]);
-        await safeReply(ctx, `✅ تم إرسال التذكير لـ ${success} مستخدم في Group ${groupId.slice(0, 8)}`);
+        await safeReply(ctx, `✅ تم إرسال التذكير لـ ${success} مستخدم في Group ${groupId.slice(0, 8)}\n\n⏸️ تم إيقاف التوزيع لهذه المجموعة`);
         await ctx.answerCbQuery();
       } catch (err) {
         console.error(err);
@@ -1521,7 +1575,9 @@ bot.on("callback_query", async (ctx) => {
 async function runDailyDistribution() {
   console.log("📦 بدء توزيع الأكواد...");
   try {
-    const groups = await q(`SELECT id FROM groups WHERE is_scheduler_active=true`);
+    const groups = await q(`SELECT id, payment_mode_active FROM groups WHERE is_scheduler_active=true AND payment_mode_active=false`);
+    
+    console.log(`✅ Found ${groups.rowCount} active groups (not in payment mode)`);
     
     for (const group of groups.rows) {
       const groupSettings = await getGroupSettings(group.id);
