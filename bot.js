@@ -848,11 +848,29 @@ bot.on("text", async (ctx) => {
         return safeReply(ctx, "⏸️ التوزيع متوقف حالياً من قبل الأدمن.\n\نسيتم استئناف التوزيع عند إعادة التفعيل.");
       }
       
+      // التحقق من وجود أكواد معلقة (توقف مؤقت)
       const today = new Date().toISOString().slice(0, 10);
+      const pendingCodes = await q(
+        `SELECT COUNT(*) FROM code_view_assignments 
+         WHERE assigned_to_user_id=$1 AND marked_unused=true AND assigned_date=$2`,
+        [userId, today]
+      );
+      
+      if (parseInt(pendingCodes.rows[0].count) > 0) {
+        return safeReply(ctx, 
+          `⏸️ أنت في وضع التوقف المؤقت\n\n` +
+          `💡 الهدف: زيادة فرصك في استخدام الأكواد\n\n` +
+          `📊 في بينانس: كلما استخدم الآخرون كودك، زادت فرصك\n\n` +
+          `⏳ ستستأنف تلقائياً عند استخدام أي شخص لكودك\n\n` +
+          `🔔 ستصلك رسالة فورية مع الكود التالي\n\n` +
+          `📋 استخدم /my_codes_status لمعرفة حالة أكوادك`
+        );
+      }
+      
       const res = await q(
         `SELECT a.id as a_id, c.code_text, a.used FROM code_view_assignments a 
          JOIN codes c ON a.code_id=c.id 
-         WHERE a.assigned_to_user_id=$1 AND a.assigned_date=$2 AND a.used=false
+         WHERE a.assigned_to_user_id=$1 AND a.assigned_date=$2 AND a.used=false AND a.marked_unused=false
          ORDER BY c.day_number ASC, c.created_at ASC LIMIT 1`,
         [userId, today]
       );
@@ -863,12 +881,69 @@ bot.on("text", async (ctx) => {
 
       const row = res.rows[0];
       const keyboard = Markup.inlineKeyboard([
-        [Markup.button.callback("✅ تم الاستخدام", `done_${row.a_id}`)],
+        [
+          Markup.button.callback("✅ تم الاستخدام", `done_${row.a_id}`),
+          Markup.button.callback("❌ توقف مؤقت", `notdone_${row.a_id}`)
+        ],
       ]);
 
-      return safeReply(ctx, `📦 كود اليوم:\n\n<code>${row.code_text}</code>\n\n💡 اضغط على الكود لنسخه، ثم استخدمه\nبعد ذلك اضغط "تم الاستخدام"`, { ...keyboard, parse_mode: 'HTML' });
+      return safeReply(ctx, `📦 كود اليوم:\n\n<code>${row.code_text}</code>\n\n💡 اضغط على الكود لنسخه، ثم استخدمه\n\n✅ تم الاستخدام - إذا استخدمته في بينانس\n❌ توقف مؤقت - لزيادة فرصك (سيستأنف تلقائياً)`, { ...keyboard, parse_mode: 'HTML' });
     } catch (err) {
       console.error("❌ اكواد_اليوم:", err.message);
+      return safeReply(ctx, "❌ حدث خطأ، حاول لاحقًا.");
+    }
+  }
+
+  if (text === "/my_codes_status" || text.includes("my_codes_status")) {
+    try {
+      const res = await q("SELECT id FROM users WHERE telegram_id=$1", [uid]);
+      if (res.rowCount === 0) {
+        return safeReply(ctx, "سجل أولًا باستخدام /تسجيل");
+      }
+      const userId = res.rows[0].id;
+      const today = new Date().toISOString().slice(0, 10);
+      
+      const myCodes = await q(
+        `SELECT c.id, c.code_text, c.views_per_day, c.day_number,
+                COUNT(a.id) FILTER (WHERE a.used=true) as used_count,
+                STRING_AGG(u.auto_name, ', ') FILTER (WHERE a.used=true) as users_list
+         FROM codes c
+         LEFT JOIN code_view_assignments a ON a.code_id = c.id AND a.assigned_date=$2
+         LEFT JOIN users u ON a.assigned_to_user_id = u.id
+         WHERE c.owner_id=$1 AND c.status='active'
+         GROUP BY c.id, c.code_text, c.views_per_day, c.day_number
+         ORDER BY c.day_number ASC`,
+        [userId, today]
+      );
+      
+      if (myCodes.rowCount === 0) {
+        return safeReply(ctx, "❌ لا توجد لديك أكواد نشطة اليوم");
+      }
+      
+      let message = `📊 حالة أكوادك اليوم:\n\n`;
+      
+      myCodes.rows.forEach((code, i) => {
+        const usedCount = parseInt(code.used_count) || 0;
+        const maxCount = code.views_per_day || 50;
+        const percentage = Math.round((usedCount / maxCount) * 100);
+        
+        message += `${i + 1}. ${code.code_text}\n`;
+        message += `   📊 ${usedCount}/${maxCount} (${percentage}%)\n`;
+        
+        if (code.users_list) {
+          const users = code.users_list.split(', ');
+          if (users.length <= 5) {
+            message += `   👥 ${code.users_list}\n`;
+          } else {
+            message += `   👥 ${users.slice(0, 5).join(', ')} +${users.length - 5} آخرين\n`;
+          }
+        }
+        message += `\n`;
+      });
+      
+      return safeReply(ctx, message);
+    } catch (err) {
+      console.error("❌ my_codes_status:", err.message);
       return safeReply(ctx, "❌ حدث خطأ، حاول لاحقًا.");
     }
   }
@@ -1003,19 +1078,98 @@ bot.on("callback_query", async (ctx) => {
   if (action.startsWith("done_")) {
     const assignmentId = action.replace("done_", "");
     try {
+      // تحديث الكود كمستخدم
       await q("UPDATE code_view_assignments SET used=true, last_interaction_date=CURRENT_DATE WHERE id=$1", [assignmentId]);
       
       const uid = ctx.from.id.toString();
-      const u = await q("SELECT id FROM users WHERE telegram_id=$1", [uid]);
+      const u = await q("SELECT id, auto_name FROM users WHERE telegram_id=$1", [uid]);
       if (u.rowCount > 0) {
         const userId = u.rows[0].id;
+        const userName = u.auto_name;
+        
+        // حذف العقوبات
         await q("DELETE FROM user_penalties WHERE user_id=$1", [userId]);
+        
+        // الحصول على معلومات الكود
+        const codeInfo = await q(
+          `SELECT c.id as code_id, c.owner_id, c.code_text, u.telegram_id as owner_telegram_id, u.auto_name as owner_name
+           FROM code_view_assignments a
+           JOIN codes c ON a.code_id = c.id
+           JOIN users u ON c.owner_id = u.id
+           WHERE a.id = $1`,
+          [assignmentId]
+        );
+        
+        if (codeInfo.rowCount > 0 && codeInfo.rows[0].owner_id !== userId) {
+          const codeData = codeInfo.rows[0];
+          const today = new Date().toISOString().slice(0, 10);
+          
+          // حساب عدد من استخدم الكود اليوم
+          const usageCount = await q(
+            `SELECT COUNT(*) as count, STRING_AGG(u.auto_name, ', ') as users_list
+             FROM code_view_assignments a
+             JOIN users u ON a.assigned_to_user_id = u.id
+             WHERE a.code_id=$1 AND a.assigned_date=$2 AND a.used=true`,
+            [codeData.code_id, today]
+          );
+          
+          const totalUsed = parseInt(usageCount.rows[0].count) || 0;
+          const usersList = usageCount.rows[0].users_list || userName;
+          
+          // التحقق من وجود أكواد معلقة لصاحب الكود
+          const ownerPendingCodes = await q(
+            `SELECT a.id as a_id, c.code_text 
+             FROM code_view_assignments a
+             JOIN codes c ON a.code_id = c.id
+             WHERE a.assigned_to_user_id=$1 AND a.marked_unused=true AND a.assigned_date=$2
+             ORDER BY c.day_number ASC, c.created_at ASC LIMIT 1`,
+            [codeData.owner_id, today]
+          );
+          
+          // إرسال إشعار لصاحب الكود
+          try {
+            let notificationMsg = `🔔 تم استخدام كودك!\n\n` +
+              `📦 الكود: ${codeData.code_text}\n` +
+              `👤 استخدمه: ${userName}\n\n` +
+              `📊 إجمالي الاستخدام اليوم: ${totalUsed}\n\n` +
+              `👥 المستخدمون:\n${usersList.split(', ').map(u => `  • ${u}`).join('\n')}\n\n` +
+              `💡 قارن هذا العدد بعدد الاستخدام في بينانس`;
+            
+            // إذا كان لديه أكواد معلقة، أرسل الكود التالي تلقائياً
+            if (ownerPendingCodes.rowCount > 0) {
+              const pendingCode = ownerPendingCodes.rows[0];
+              
+              // إلغاء التعليق
+              await q(`UPDATE code_view_assignments SET marked_unused=false WHERE id=$1`, [pendingCode.a_id]);
+              
+              notificationMsg += `\n\n━━━━━━━━━━━━━━━━━\n\n` +
+                `✅ تم زيادة فرصك! يمكنك الاستمرار\n\n` +
+                `📦 استكمل من هنا:\n\n<code>${pendingCode.code_text}</code>`;
+              
+              const keyboard = Markup.inlineKeyboard([
+                [
+                  Markup.button.callback("✅ تم الاستخدام", `done_${pendingCode.a_id}`),
+                  Markup.button.callback("❌ توقف مؤقت", `notdone_${pendingCode.a_id}`)
+                ],
+              ]);
+              
+              await bot.telegram.sendMessage(codeData.owner_telegram_id, notificationMsg, { 
+                parse_mode: 'HTML',
+                reply_markup: keyboard.reply_markup 
+              });
+            } else {
+              await bot.telegram.sendMessage(codeData.owner_telegram_id, notificationMsg);
+            }
+          } catch (e) {
+            console.log(`Could not send notification to code owner ${codeData.owner_telegram_id}`);
+          }
+        }
         
         const today = new Date().toISOString().slice(0, 10);
         const nextCode = await q(
           `SELECT a.id as a_id, c.code_text FROM code_view_assignments a 
            JOIN codes c ON a.code_id=c.id 
-           WHERE a.assigned_to_user_id=$1 AND a.assigned_date=$2 AND a.used=false
+           WHERE a.assigned_to_user_id=$1 AND a.assigned_date=$2 AND a.used=false AND a.marked_unused=false
            ORDER BY c.day_number ASC, c.created_at ASC LIMIT 1`,
           [userId, today]
         );
@@ -1023,10 +1177,13 @@ bot.on("callback_query", async (ctx) => {
         if (nextCode.rowCount > 0) {
           const row = nextCode.rows[0];
           const keyboard = Markup.inlineKeyboard([
-            [Markup.button.callback("✅ تم الاستخدام", `done_${row.a_id}`)],
+            [
+              Markup.button.callback("✅ تم الاستخدام", `done_${row.a_id}`),
+              Markup.button.callback("❌ توقف مؤقت", `notdone_${row.a_id}`)
+            ],
           ]);
           await ctx.answerCbQuery("✅ رائع! إليك الكود التالي");
-          await safeReply(ctx, `📦 الكود التالي:\n\n<code>${row.code_text}</code>\n\n💡 اضغط على الكود لنسخه`, { ...keyboard, parse_mode: 'HTML' });
+          await safeReply(ctx, `📦 الكود التالي:\n\n<code>${row.code_text}</code>\n\n💡 اضغط على الكود لنسخه\n\n✅ تم الاستخدام - إذا استخدمته\n❌ توقف مؤقت - لزيادة فرصك`, { ...keyboard, parse_mode: 'HTML' });
         } else {
           await ctx.answerCbQuery("🎉 تم إكمال كل الأكواد!");
           await safeReply(ctx, "✅ تم إكمال جميع الأكواد اليوم! أحسنت 🎉");
@@ -1034,6 +1191,27 @@ bot.on("callback_query", async (ctx) => {
       }
     } catch (err) {
       console.error("❌ done callback:", err.message);
+      await ctx.answerCbQuery("❌ خطأ");
+    }
+    return;
+  }
+  
+  if (action.startsWith("notdone_")) {
+    const assignmentId = action.replace("notdone_", "");
+    try {
+      // تعليم الكود كـ "لم يتم الاستخدام" (توقف مؤقت)
+      await q("UPDATE code_view_assignments SET marked_unused=true WHERE id=$1", [assignmentId]);
+      
+      await ctx.answerCbQuery("⏸️ تم التوقف مؤقتاً");
+      await safeReply(ctx, 
+        `⏸️ تم التوقف مؤقتاً\n\n` +
+        `💡 السبب: زيادة فرصك في استخدام الأكواد\n\n` +
+        `📊 في بينانس: يجب أن يستخدم الآخرون كودك أولاً لزيادة فرصك\n\n` +
+        `⏳ ستستأنف تلقائياً عند استخدام أي شخص لكودك\n\n` +
+        `🔔 ستصلك رسالة فورية عند الاستخدام`
+      );
+    } catch (err) {
+      console.error("❌ notdone callback:", err.message);
       await ctx.answerCbQuery("❌ خطأ");
     }
     return;
