@@ -1,4 +1,10 @@
-// bot.js - COMPLETE FINAL VERSION with all features
+// bot.js - COMPLETE FINAL VERSION v2.1
+// ==========================================
+// الإصدار: 2.1
+// بناءً على: الكود الأصلي 1909 سطر (UPDATED VERSION with verification system)
+// التعديل المُضاف: معالجة أزرار verify_ و reject_ في callback_query
+// ==========================================
+
 import { Telegraf, Markup } from "telegraf";
 import fs from "fs";
 import pkg from "pg";
@@ -183,16 +189,43 @@ async function safeReply(ctx, message, extra) {
   }
 }
 
-function mainKeyboard(userId) {
-  const buttons = [
-    [Markup.button.text("/تسجيل"), Markup.button.text("/رفع_اكواد")],
-    [Markup.button.text("/اكواد_اليوم"), Markup.button.text("/اكوادى")],
-    [Markup.button.text("📸 إرسال إثبات الدفع")],
-    [Markup.button.contactRequest("📱 إرسال رقم الهاتف")],
-  ];
+// 🆕 دالة لإنشاء الأزرار الديناميكية بناءً على حالة المستخدم
+async function getDynamicKeyboard(userId, groupId = null) {
+  const buttons = [];
+  
+  // التحقق من تسجيل المستخدم
+  const userRes = await q("SELECT id, group_id FROM users WHERE telegram_id=$1", [userId.toString()]);
+  const isRegistered = userRes.rowCount > 0;
+  
+  if (!isRegistered) {
+    // المستخدم غير مسجل - إظهار أزرار التسجيل فقط
+    buttons.push([Markup.button.text("/تسجيل")]);
+  } else {
+    // المستخدم مسجل - إظهار الأزرار الرئيسية
+    const userGroupId = groupId || userRes.rows[0].group_id;
+    buttons.push(
+      [Markup.button.text("/رفع_اكواد"), Markup.button.text("/اكواد_اليوم")],
+      [Markup.button.text("/اكوادى"), Markup.button.text("✅ تأكيد الاستخدام")]
+    );
+    
+    // التحقق من يوم الدفع
+    const groupSettings = await getGroupSettings(userGroupId);
+    const now = new Date();
+    const currentDay = now.getDate();
+    const paymentDay = groupSettings.payment_day || 1;
+    
+    // إظهار زر الدفع في يوم الدفع أو ±2 أيام
+    const daysDiff = Math.abs(currentDay - paymentDay);
+    if (daysDiff <= 2 || daysDiff >= 26) { // 26 لتغطية نهاية/بداية الشهر
+      buttons.push([Markup.button.text("📸 إرسال إثبات الدفع")]);
+    }
+  }
+  
+  // زر الأدمن (إذا كان أدمن)
   if (userId?.toString() === ADMIN_ID?.toString()) {
     buttons.push([Markup.button.text("/admin")]);
   }
+  
   return Markup.keyboard(buttons).resize();
 }
 
@@ -201,6 +234,7 @@ bot.start(async (ctx) => {
     `📜 قواعد الاستخدام:\n\n` +
     `✅ استخدم الكود يومياً قبل منتصف الليل\n` +
     `✅ اضغط "تم الاستخدام" في البوت\n` +
+    `✅ قم بتأكيد من استخدم أكوادك\n` +
     `✅ الالتزام مهم\n\n` +
     `⚠️ العقوبات:\n` +
     `❌ يوم واحد: تذكير ونقل باقى الأكواد الى اليوم التالى\n` +
@@ -211,7 +245,7 @@ bot.start(async (ctx) => {
     `/اكواد_اليوم - لعرض أكواد اليوم\n` +
     `/اكوادى - لعرض أكوادك`;
   
-  await safeReply(ctx, rulesMessage, mainKeyboard(ctx.from.id));
+  await safeReply(ctx, rulesMessage, await getDynamicKeyboard(ctx.from.id));
 });
 
 // أمر للحصول على Chat ID للجروب (للأدمن فقط)
@@ -240,7 +274,7 @@ bot.hears(/^\/تسجيل/, async (ctx) => {
       return safeReply(ctx, "أنت مسجل بالفعل ✅");
     }
     userState[tgId] = { stage: "awaiting_binance" };
-    return safeReply(ctx, "أدخل معرف بينانس الخاص بك:");
+    return safeReply(ctx, "🔰 التسجيل - الخطوة 1/2\n\nأدخل اسم المستخدم الخاص بك في بينانس:\n\n💡 هذا الاسم سيُستخدم للتحقق من استخدام الأكواد");
   } catch (err) {
     console.error("❌ registration error:", err.message);
     return safeReply(ctx, "❌ حدث خطأ داخلي. حاول لاحقًا.");
@@ -273,8 +307,8 @@ bot.on("contact", async (ctx) => {
     const dupPhone = await q("SELECT id FROM users WHERE phone=$1", [phone]);
     const dupTelegram = await q("SELECT id FROM users WHERE telegram_id=$1", [tgId]);
     let dupBinance = { rowCount: 0 };
-    if (st.binance) {
-      dupBinance = await q("SELECT id FROM users WHERE binance_id=$1", [st.binance]);
+    if (st.binance_username) {
+      dupBinance = await q("SELECT id FROM users WHERE binance_username=$1", [st.binance_username]);
     }
     if (dupPhone.rowCount > 0 || dupTelegram.rowCount > 0 || dupBinance.rowCount > 0) {
       delete userState[tgId];
@@ -291,26 +325,37 @@ bot.on("contact", async (ctx) => {
 
     const autoName = await autoNameInGroup(groupId);
 
-    await q(`INSERT INTO users (telegram_id, binance_id, phone, auto_name, group_id, verified, created_at) VALUES ($1,$2,$3,$4,$5,true,NOW())`, [tgId, st.binance || null, phone, autoName, groupId]);
+    await q(
+      `INSERT INTO users (telegram_id, binance_username, phone, auto_name, group_id, verified, created_at) 
+       VALUES ($1,$2,$3,$4,$5,true,NOW())`,
+      [tgId, st.binance_username || null, phone, autoName, groupId]
+    );
     delete userState[tgId];
     
     const welcomeMessage = `🎉 أهلاً بك فى بوت تبادل أكواد الظرف الأحمر\n\n` +
       `✅ تم التسجيل بنجاح!\n\n` +
       `🆔 المجموعة: ${groupId.toString().slice(0, 8)}\n` +
-      `👤 اسمك: ${autoName}\n\n` +
+      `👤 اسمك: ${autoName}\n` +
+      `💼 اسم بينانس: ${st.binance_username}\n\n` +
       `━━━━━━━━━━━━━━━━━\n\n` +
       `📜 قواعد الاستخدام:\n\n` +
       `✅ استخدم الكود يومياً قبل منتصف الليل\n` +
       `✅ اضغط "تم الاستخدام" في البوت\n` +
+      `✅ قم بتأكيد من استخدم أكوادك يومياً\n` +
       `✅ الالتزام مهم\n\n` +
       `⚠️ العقوبات:\n\n` +
-      `❌ يوم واحد: تذكير ونقل باقى الأكواد الى اليوم التالى\n` +
-      `❌ يومين: تحذير نهائي\n` +
-      `❌ 3 أيام: إيقاف تلقائي + حذف أكوادك\n\n` +
+      `❌ عدم التأكيد على الأكواد:\n` +
+      `   • يوم 1: حجب أكوادك يوم واحد\n` +
+      `   • يوم 2: حجب يومين\n` +
+      `   • يوم 3: حذف الحساب نهائياً\n\n` +
+      `❌ الاعتراض الكاذب:\n` +
+      `   • مرة 1: حجب أكوادك يوم واحد\n` +
+      `   • مرة 2: حجب يومين\n` +
+      `   • مرة 3: حذف الحساب نهائياً\n\n` +
       `━━━━━━━━━━━━━━━━━\n\n` +
       `💡 استخدم /start لعرض القائمة الرئيسية`;
     
-    return safeReply(ctx, welcomeMessage, mainKeyboard(ctx.from.id));
+    return safeReply(ctx, welcomeMessage, await getDynamicKeyboard(ctx.from.id, groupId));
   } catch (err) {
     console.error("❌ contact handler:", err.message);
     return safeReply(ctx, "❌ حدث خطأ داخلي أثناء التسجيل.");
@@ -335,7 +380,7 @@ bot.on("photo", async (ctx) => {
     const caption = ctx.message.caption || "";
     
     // تسجيل إثبات الدفع
-    const currentMonth = new Date().toISOString().slice(0, 7); // 2025-01
+    const currentMonth = new Date().toISOString().slice(0, 7);
     try {
       await q(
         `INSERT INTO payments (user_id, group_id, payment_month, proof_sent, proof_sent_at) 
@@ -520,6 +565,8 @@ bot.hears(/^\/banuser /, async (ctx) => {
     
     // 4. حذف العقوبات
     await q(`DELETE FROM user_penalties WHERE user_id=$1`, [userData.id]);
+    await q(`DELETE FROM confirmation_penalties WHERE user_id=$1`, [userData.id]);
+    await q(`DELETE FROM verification_penalties WHERE user_id=$1`, [userData.id]);
     
     // 5. حذف سجلات الدفع
     await q(`DELETE FROM payments WHERE user_id=$1`, [userData.id]);
@@ -613,6 +660,8 @@ bot.hears(/^\/reset_cycle/, async (ctx) => {
     await q("DELETE FROM code_view_assignments");
     await q("DELETE FROM codes");
     await q("DELETE FROM user_penalties");
+    await q("DELETE FROM confirmation_penalties");
+    await q("DELETE FROM verification_penalties");
     return safeReply(ctx, "🔄 تم بدء دورة جديدة!");
   } catch (err) {
     console.error(err);
@@ -767,6 +816,7 @@ bot.on("text", async (ctx) => {
     }
   }
 
+  // 🆕 زر إرسال إثبات الدفع
   if (text === "📸 إرسال إثبات الدفع") {
     try {
       const userRes = await q("SELECT id FROM users WHERE telegram_id=$1", [uid]);
@@ -777,6 +827,68 @@ bot.on("text", async (ctx) => {
       return safeReply(ctx, "📸 أرسل الآن صورة إثبات الدفع\n\n💡 يمكنك إضافة رسالة مع الصورة إذا أردت\n\n⚠️ تأكد من وضوح الصورة");
     } catch (err) {
       console.error("❌ payment proof button:", err.message);
+      return safeReply(ctx, "❌ حدث خطأ، حاول لاحقًا.");
+    }
+  }
+
+  // 🆕 زر تأكيد الاستخدام - عرض الأكواد التي تحتاج تأكيد
+  if (text === "✅ تأكيد الاستخدام") {
+    try {
+      const userRes = await q("SELECT id, binance_username FROM users WHERE telegram_id=$1", [uid]);
+      if (userRes.rowCount === 0) {
+        return safeReply(ctx, "⚠️ يجب التسجيل أولاً باستخدام /تسجيل");
+      }
+      
+      const userId = userRes.rows[0].id;
+      const today = new Date().toISOString().slice(0, 10);
+      
+      // الحصول على الأكواد التي استُخدمت ولم يتم التأكيد عليها بعد
+      const pendingVerifications = await q(
+        `SELECT 
+          a.id as assignment_id,
+          c.code_text,
+          u.auto_name as user_name,
+          u.binance_username,
+          a.used,
+          a.verified
+         FROM code_view_assignments a
+         JOIN codes c ON a.code_id = c.id
+         JOIN users u ON a.assigned_to_user_id = u.id
+         WHERE c.owner_id = $1 
+           AND a.assigned_date = $2 
+           AND a.used = true 
+           AND a.verified = false
+         ORDER BY a.presented_at ASC
+         LIMIT 10`,
+        [userId, today]
+      );
+      
+      if (pendingVerifications.rowCount === 0) {
+        return safeReply(ctx, "✅ لا توجد أكواد تحتاج تأكيد حالياً\n\n💡 سيتم إرسال إشعار لك عند استخدام أي شخص لأكوادك");
+      }
+      
+      let message = `📋 الأكواد التي تحتاج تأكيد (${pendingVerifications.rowCount}):\n\n`;
+      
+      const keyboard = [];
+      pendingVerifications.rows.forEach((row, i) => {
+        message += `${i + 1}. الكود: ${row.code_text}\n`;
+        message += `   👤 المستخدم: ${row.user_name}\n`;
+        message += `   💼 بينانس: ${row.binance_username || 'غير محدد'}\n\n`;
+        
+        keyboard.push([
+          Markup.button.callback(`✅ تأكيد ${i + 1}`, `verify_${row.assignment_id}`),
+          Markup.button.callback(`❌ اعتراض ${i + 1}`, `reject_${row.assignment_id}`)
+        ]);
+      });
+      
+      message += `━━━━━━━━━━━━━━━━━\n\n`;
+      message += `💡 راجع قائمة من استخدم أكوادك في بينانس\n`;
+      message += `✅ اضغط "تأكيد" إذا وجدت الاسم\n`;
+      message += `❌ اضغط "اعتراض" إذا لم تجد الاسم`;
+      
+      return safeReply(ctx, message, Markup.inlineKeyboard(keyboard));
+    } catch (err) {
+      console.error("❌ verification button:", err.message);
       return safeReply(ctx, "❌ حدث خطأ، حاول لاحقًا.");
     }
   }
@@ -845,7 +957,7 @@ bot.on("text", async (ctx) => {
       }
       
       if (!groupSettings.is_scheduler_active) {
-        return safeReply(ctx, "⏸️ التوزيع متوقف حالياً من قبل الأدمن.\n\نسيتم استئناف التوزيع عند إعادة التفعيل.");
+        return safeReply(ctx, "⏸️ التوزيع متوقف حالياً من قبل الأدمن.\n\nسيتم استئناف التوزيع عند إعادة التفعيل.");
       }
       
       // التحقق من وجود أكواد معلقة (توقف مؤقت)
@@ -906,7 +1018,9 @@ bot.on("text", async (ctx) => {
       const myCodes = await q(
         `SELECT c.id, c.code_text, c.views_per_day, c.day_number,
                 COUNT(a.id) FILTER (WHERE a.used=true) as used_count,
-                STRING_AGG(u.auto_name, ', ') FILTER (WHERE a.used=true) as users_list
+                COUNT(a.id) FILTER (WHERE a.used=true AND a.verified=true) as verified_count,
+                STRING_AGG(u.auto_name, ', ') FILTER (WHERE a.used=true) as users_list,
+                STRING_AGG(u.binance_username, ', ') FILTER (WHERE a.used=true) as binance_list
          FROM codes c
          LEFT JOIN code_view_assignments a ON a.code_id = c.id AND a.assigned_date=$2
          LEFT JOIN users u ON a.assigned_to_user_id = u.id
@@ -924,22 +1038,38 @@ bot.on("text", async (ctx) => {
       
       myCodes.rows.forEach((code, i) => {
         const usedCount = parseInt(code.used_count) || 0;
+        const verifiedCount = parseInt(code.verified_count) || 0;
         const maxCount = code.views_per_day || 50;
         const percentage = Math.round((usedCount / maxCount) * 100);
+        const pendingVerification = usedCount - verifiedCount;
         
         message += `${i + 1}. ${code.code_text}\n`;
         message += `   📊 ${usedCount}/${maxCount} (${percentage}%)\n`;
+        message += `   ✅ تم التأكيد: ${verifiedCount}\n`;
+        if (pendingVerification > 0) {
+          message += `   ⏳ بانتظار التأكيد: ${pendingVerification}\n`;
+        }
         
         if (code.users_list) {
           const users = code.users_list.split(', ');
-          if (users.length <= 5) {
-            message += `   👥 ${code.users_list}\n`;
+          const binanceUsers = code.binance_list ? code.binance_list.split(', ') : [];
+          if (users.length <= 3) {
+            users.forEach((user, idx) => {
+              const binance = binanceUsers[idx] || 'غير محدد';
+              message += `   👤 ${user} (${binance})\n`;
+            });
           } else {
-            message += `   👥 ${users.slice(0, 5).join(', ')} +${users.length - 5} آخرين\n`;
+            for (let idx = 0; idx < 3; idx++) {
+              const binance = binanceUsers[idx] || 'غير محدد';
+              message += `   👤 ${users[idx]} (${binance})\n`;
+            }
+            message += `   ... +${users.length - 3} آخرين\n`;
           }
         }
         message += `\n`;
       });
+      
+      message += `💡 استخدم زر "✅ تأكيد الاستخدام" للتأكيد على من استخدم أكوادك`;
       
       return safeReply(ctx, message);
     } catch (err) {
@@ -1018,11 +1148,11 @@ bot.on("text", async (ctx) => {
   if (st.stage === "awaiting_binance") {
     const binance = ctx.message.text.trim();
     if (!binance || binance.length > 100) {
-      return safeReply(ctx, "⚠️ معرف غير صالح، حاول مجددًا.");
+      return safeReply(ctx, "⚠️ اسم مستخدم غير صالح، حاول مجددًا.");
     }
-    st.binance = binance;
+    st.binance_username = binance;
     st.stage = "awaiting_phone";
-    return safeReply(ctx, "أرسل رقم هاتفك عبر زر المشاركة:", {
+    return safeReply(ctx, "🔰 التسجيل - الخطوة 2/2\n\nأرسل رقم هاتفك عبر زر المشاركة:", {
       reply_markup: { keyboard: [[{ text: "📱 إرسال رقم الهاتف", request_contact: true }]], one_time_keyboard: true, resize_keyboard: true }
     });
   }
@@ -1072,25 +1202,143 @@ bot.on("text", async (ctx) => {
   }
 });
 
+// ==================== CALLBACK QUERY HANDLER ====================
+
 bot.on("callback_query", async (ctx) => {
   const action = ctx.callbackQuery.data;
+
+  // ==========================================
+  // 🆕 التعديل المُضاف: معالجة verify_ و reject_
+  // ==========================================
+
+  // ✅ تأكيد الاستخدام - صاحب الكود يؤكد أن الشخص استخدم الكود فعلاً
+  if (action.startsWith("verify_")) {
+    const assignmentId = action.replace("verify_", "");
+    try {
+      await q("UPDATE code_view_assignments SET verified=true WHERE id=$1", [assignmentId]);
+      await ctx.answerCbQuery("✅ تم التأكيد بنجاح!");
+      await safeReply(ctx, "✅ تم تأكيد الاستخدام بنجاح!\n\n💡 شكراً على الالتزام بالتأكيد اليومي");
+    } catch (err) {
+      console.error("❌ verify callback:", err.message);
+      await ctx.answerCbQuery("❌ خطأ في التأكيد");
+    }
+    return;
+  }
+
+  // ❌ الاعتراض - صاحب الكود يعترض على أن الشخص لم يستخدم الكود فعلاً
+  if (action.startsWith("reject_")) {
+    const assignmentId = action.replace("reject_", "");
+    try {
+      // الحصول على بيانات المستخدم المخالف
+      const assignInfo = await q(
+        `SELECT a.assigned_to_user_id, u.telegram_id, u.auto_name, u.id as violator_db_id
+         FROM code_view_assignments a
+         JOIN users u ON a.assigned_to_user_id = u.id
+         WHERE a.id=$1`,
+        [assignmentId]
+      );
+
+      if (assignInfo.rowCount > 0) {
+        const violator = assignInfo.rows[0];
+
+        // التحقق من عقوبات الاعتراض السابقة
+        const existing = await q(
+          `SELECT id, false_claim_count FROM verification_penalties WHERE user_id=$1`,
+          [violator.violator_db_id]
+        );
+
+        let falseCount = 1;
+        if (existing.rowCount > 0) {
+          falseCount = existing.rows[0].false_claim_count + 1;
+          await q(
+            `UPDATE verification_penalties SET false_claim_count=$1, last_false=NOW() WHERE user_id=$2`,
+            [falseCount, violator.violator_db_id]
+          );
+        } else {
+          await q(
+            `INSERT INTO verification_penalties (user_id, false_claim_count, last_false) VALUES ($1, 1, NOW())`,
+            [violator.violator_db_id]
+          );
+        }
+
+        // تطبيق العقوبة بناءً على عدد المخالفات
+        let penaltyMsg = "";
+        if (falseCount === 1) {
+          // المخالفة الأولى: حجب الأكواد يوم واحد
+          await q(
+            `UPDATE codes SET status='suspended', suspension_until=(NOW() + INTERVAL '1 day')
+             WHERE owner_id=$1 AND status='active'`,
+            [violator.violator_db_id]
+          );
+          penaltyMsg = `⚠️ تم الاعتراض على استخدامك للكود!\n\n` +
+            `🚫 العقوبة: حجب أكوادك لمدة يوم واحد\n\n` +
+            `⚠️ هذه المرة الأولى - كن حذراً!\n` +
+            `💡 يجب استخدام الأكواد فعلياً في بينانس`;
+        } else if (falseCount === 2) {
+          // المخالفة الثانية: حجب الأكواد يومين
+          await q(
+            `UPDATE codes SET status='suspended', suspension_until=(NOW() + INTERVAL '2 days')
+             WHERE owner_id=$1 AND status='active'`,
+            [violator.violator_db_id]
+          );
+          penaltyMsg = `⚠️ اعتراض ثانٍ على استخدامك للكود!\n\n` +
+            `🚫 العقوبة: حجب أكوادك لمدة يومين\n\n` +
+            `🚨 هذا تحذير نهائي!\n` +
+            `💡 المرة القادمة = حذف الحساب نهائياً`;
+        } else {
+          // المخالفة الثالثة: حذف الحساب نهائياً
+          await q(`DELETE FROM codes WHERE owner_id=$1`, [violator.violator_db_id]);
+          await q(`DELETE FROM code_view_assignments WHERE assigned_to_user_id=$1`, [violator.violator_db_id]);
+          await q(`DELETE FROM verification_penalties WHERE user_id=$1`, [violator.violator_db_id]);
+          await q(`DELETE FROM confirmation_penalties WHERE user_id=$1`, [violator.violator_db_id]);
+          await q(`DELETE FROM user_penalties WHERE user_id=$1`, [violator.violator_db_id]);
+          await q(`DELETE FROM payments WHERE user_id=$1`, [violator.violator_db_id]);
+          await q(`DELETE FROM users WHERE id=$1`, [violator.violator_db_id]);
+          penaltyMsg = `🚫 تم حذف حسابك نهائياً من البوت!\n\n` +
+            `❌ السبب: اعتراض كاذب 3 مرات\n\n` +
+            `⚠️ تم حذف جميع أكوادك وحسابك`;
+        }
+
+        // إرسال إشعار العقوبة للمخالف
+        try {
+          await bot.telegram.sendMessage(violator.telegram_id, penaltyMsg);
+        } catch (e) {
+          console.log(`Could not send rejection penalty to ${violator.telegram_id}`);
+        }
+
+        // إعادة التوزيع: تعليم الكود كـ غير مستخدم حتى يُعاد توزيعه
+        if (falseCount < 3) {
+          await q("UPDATE code_view_assignments SET verified=false, used=false WHERE id=$1", [assignmentId]);
+        }
+      }
+
+      await ctx.answerCbQuery("✅ تم تسجيل الاعتراض");
+      await safeReply(ctx, "✅ تم تسجيل الاعتراض وتطبيق العقوبة المناسبة");
+    } catch (err) {
+      console.error("❌ reject callback:", err.message);
+      await ctx.answerCbQuery("❌ خطأ في تسجيل الاعتراض");
+    }
+    return;
+  }
+
+  // ==========================================
+  // باقي الـ callbacks الأصلية
+  // ==========================================
 
   if (action.startsWith("done_")) {
     const assignmentId = action.replace("done_", "");
     try {
-      // تحديث الكود كمستخدم
       await q("UPDATE code_view_assignments SET used=true, last_interaction_date=CURRENT_DATE WHERE id=$1", [assignmentId]);
       
       const uid = ctx.from.id.toString();
-      const u = await q("SELECT id, auto_name FROM users WHERE telegram_id=$1", [uid]);
+      const u = await q("SELECT id, auto_name, group_id FROM users WHERE telegram_id=$1", [uid]);
       if (u.rowCount > 0) {
         const userId = u.rows[0].id;
-        const userName = u.auto_name;
+        const userName = u.rows[0].auto_name;
         
-        // حذف العقوبات
         await q("DELETE FROM user_penalties WHERE user_id=$1", [userId]);
         
-        // الحصول على معلومات الكود
+        // إشعار صاحب الكود عند الاستخدام
         const codeInfo = await q(
           `SELECT c.id as code_id, c.owner_id, c.code_text, u.telegram_id as owner_telegram_id, u.auto_name as owner_name
            FROM code_view_assignments a
@@ -1104,86 +1352,63 @@ bot.on("callback_query", async (ctx) => {
           const codeData = codeInfo.rows[0];
           const today = new Date().toISOString().slice(0, 10);
           
-          // حساب عدد من استخدم الكود اليوم
           const usageCount = await q(
-            `SELECT COUNT(*) as count, STRING_AGG(u.auto_name, ', ') as users_list
-             FROM code_view_assignments a
-             JOIN users u ON a.assigned_to_user_id = u.id
-             WHERE a.code_id=$1 AND a.assigned_date=$2 AND a.used=true`,
+            `SELECT COUNT(*) as count FROM code_view_assignments
+             WHERE code_id=$1 AND assigned_date=$2 AND used=true`,
             [codeData.code_id, today]
           );
           
-          const totalUsed = parseInt(usageCount.rows[0].count) || 0;
-          const usersList = usageCount.rows[0].users_list || userName;
-          
-          // التحقق من وجود أكواد معلقة لصاحب الكود
+          // التحقق من أكواد الانتظار لصاحب الكود (وضع التوقف المؤقت)
           const ownerPendingCodes = await q(
-            `SELECT a.id as a_id, c.code_text 
-             FROM code_view_assignments a
+            `SELECT a.id as a_id, c.code_text FROM code_view_assignments a
              JOIN codes c ON a.code_id = c.id
              WHERE a.assigned_to_user_id=$1 AND a.marked_unused=true AND a.assigned_date=$2
-             ORDER BY c.day_number ASC, c.created_at ASC LIMIT 1`,
+             ORDER BY c.day_number ASC LIMIT 1`,
             [codeData.owner_id, today]
           );
           
-          // إرسال إشعار لصاحب الكود
           try {
             let notificationMsg = `🔔 تم استخدام كودك!\n\n` +
               `📦 الكود: ${codeData.code_text}\n` +
               `👤 استخدمه: ${userName}\n\n` +
-              `📊 إجمالي الاستخدام اليوم: ${totalUsed}\n\n` +
-              `👥 المستخدمون:\n${usersList.split(', ').map(u => `  • ${u}`).join('\n')}\n\n` +
+              `📊 إجمالي الاستخدام اليوم: ${usageCount.rows[0].count}\n\n` +
               `💡 قارن هذا العدد بعدد الاستخدام في بينانس`;
             
-            // إذا كان لديه أكواد معلقة، أرسل الكود التالي تلقائياً
             if (ownerPendingCodes.rowCount > 0) {
               const pendingCode = ownerPendingCodes.rows[0];
-              
-              // إلغاء التعليق
               await q(`UPDATE code_view_assignments SET marked_unused=false WHERE id=$1`, [pendingCode.a_id]);
-              
-              notificationMsg += `\n\n━━━━━━━━━━━━━━━━━\n\n` +
-                `✅ تم زيادة فرصك! يمكنك الاستمرار\n\n` +
-                `📦 استكمل من هنا:\n\n<code>${pendingCode.code_text}</code>`;
-              
-              const keyboard = Markup.inlineKeyboard([
-                [
-                  Markup.button.callback("✅ تم الاستخدام", `done_${pendingCode.a_id}`),
-                  Markup.button.callback("❌ توقف مؤقت", `notdone_${pendingCode.a_id}`)
-                ],
-              ]);
-              
-              await bot.telegram.sendMessage(codeData.owner_telegram_id, notificationMsg, { 
-                parse_mode: 'HTML',
-                reply_markup: keyboard.reply_markup 
-              });
+              notificationMsg += `\n\n━━━━━━━━━━━━━━━━━\n\n✅ تم زيادة فرصك! يمكنك الاستمرار\n\n📦 استكمل من هنا:\n\n<code>${pendingCode.code_text}</code>`;
+              const pendingKeyboard = Markup.inlineKeyboard([[
+                Markup.button.callback("✅ تم الاستخدام", `done_${pendingCode.a_id}`),
+                Markup.button.callback("❌ توقف مؤقت", `notdone_${pendingCode.a_id}`)
+              ]]);
+              await bot.telegram.sendMessage(codeData.owner_telegram_id, notificationMsg, { parse_mode: 'HTML', reply_markup: pendingKeyboard.reply_markup });
             } else {
               await bot.telegram.sendMessage(codeData.owner_telegram_id, notificationMsg);
             }
           } catch (e) {
-            console.log(`Could not send notification to code owner ${codeData.owner_telegram_id}`);
+            console.log(`Could not notify code owner ${codeData.owner_telegram_id}`);
           }
         }
         
+        // عرض الكود التالي
         const today = new Date().toISOString().slice(0, 10);
         const nextCode = await q(
           `SELECT a.id as a_id, c.code_text FROM code_view_assignments a 
            JOIN codes c ON a.code_id=c.id 
            WHERE a.assigned_to_user_id=$1 AND a.assigned_date=$2 AND a.used=false AND a.marked_unused=false
-           ORDER BY c.day_number ASC, c.created_at ASC LIMIT 1`,
+           ORDER BY c.day_number ASC LIMIT 1`,
           [userId, today]
         );
         
         if (nextCode.rowCount > 0) {
           const row = nextCode.rows[0];
-          const keyboard = Markup.inlineKeyboard([
-            [
-              Markup.button.callback("✅ تم الاستخدام", `done_${row.a_id}`),
-              Markup.button.callback("❌ توقف مؤقت", `notdone_${row.a_id}`)
-            ],
-          ]);
+          const keyboard = Markup.inlineKeyboard([[
+            Markup.button.callback("✅ تم الاستخدام", `done_${row.a_id}`),
+            Markup.button.callback("❌ توقف مؤقت", `notdone_${row.a_id}`)
+          ]]);
           await ctx.answerCbQuery("✅ رائع! إليك الكود التالي");
-          await safeReply(ctx, `📦 الكود التالي:\n\n<code>${row.code_text}</code>\n\n💡 اضغط على الكود لنسخه\n\n✅ تم الاستخدام - إذا استخدمته\n❌ توقف مؤقت - لزيادة فرصك`, { ...keyboard, parse_mode: 'HTML' });
+          await safeReply(ctx, `✅ تم تسجيل الاستخدام!\n\n📦 الكود التالي:\n\n<code>${row.code_text}</code>\n\n✅ تم الاستخدام - إذا استخدمته\n❌ توقف مؤقت - لزيادة فرصك`, { ...keyboard, parse_mode: 'HTML' });
         } else {
           await ctx.answerCbQuery("🎉 تم إكمال كل الأكواد!");
           await safeReply(ctx, "✅ تم إكمال جميع الأكواد اليوم! أحسنت 🎉");
@@ -1195,20 +1420,18 @@ bot.on("callback_query", async (ctx) => {
     }
     return;
   }
-  
+
   if (action.startsWith("notdone_")) {
     const assignmentId = action.replace("notdone_", "");
     try {
-      // تعليم الكود كـ "لم يتم الاستخدام" (توقف مؤقت)
       await q("UPDATE code_view_assignments SET marked_unused=true WHERE id=$1", [assignmentId]);
-      
       await ctx.answerCbQuery("⏸️ تم التوقف مؤقتاً");
       await safeReply(ctx, 
-        `⏸️ تم التوقف مؤقتاً\n\n` +
-        `💡 السبب: زيادة فرصك في استخدام الأكواد\n\n` +
-        `📊 في بينانس: يجب أن يستخدم الآخرون كودك أولاً لزيادة فرصك\n\n` +
+        `⏸️ تم التوقف المؤقت\n\n` +
+        `💡 الهدف: زيادة فرصك في استخدام الأكواد\n\n` +
+        `📊 في بينانس: كلما استخدم الآخرون كودك، زادت فرصك\n\n` +
         `⏳ ستستأنف تلقائياً عند استخدام أي شخص لكودك\n\n` +
-        `🔔 ستصلك رسالة فورية عند الاستخدام`
+        `🔔 ستصلك رسالة فورية مع الكود التالي`
       );
     } catch (err) {
       console.error("❌ notdone callback:", err.message);
@@ -1217,8 +1440,9 @@ bot.on("callback_query", async (ctx) => {
     return;
   }
 
+  // Admin callbacks
   if (ctx.from.id.toString() !== ADMIN_ID) {
-    return ctx.answerCbQuery("❌ Not allowed");
+    return ctx.answerCbQuery("❌ مخصص للأدمن فقط");
   }
 
   try {
@@ -1233,43 +1457,40 @@ bot.on("callback_query", async (ctx) => {
         [Markup.button.callback("📅 Set Days", "set_days")],
         [Markup.button.callback("👥 Set Group Size", "set_group")],
         [Markup.button.callback("🔢 Set Max Groups", "set_max_groups")],
-        [Markup.button.callback("📢 Broadcast", "broadcast")],
+        [Markup.button.callback("📢 Broadcast to All", "broadcast")],
         [Markup.button.callback("◀️ Back", "back_to_main")],
       ]);
-      await ctx.editMessageText(`🌐 Global Settings\n\nPenalties System: ${s.penalties_active ? '✅ Active' : '❌ Inactive'}`, { reply_markup: keyboard.reply_markup });
+      await ctx.editMessageText(
+        `🌐 Global Settings\n\nPenalties System: ${s.penalties_active ? '✅ Active' : '❌ Inactive'}`,
+        { reply_markup: keyboard.reply_markup }
+      );
       await ctx.answerCbQuery();
       return;
     }
-    
+
     if (action === "manage_groups") {
       const groups = await q(`SELECT id, name, is_scheduler_active FROM groups ORDER BY created_at`);
       if (groups.rowCount === 0) {
-        await ctx.answerCbQuery("لا توجد مجموعات");
+        await ctx.answerCbQuery("لا توجد مجموعات بعد");
         return;
       }
       const keyboard = groups.rows.map(g => [
         Markup.button.callback(`${g.is_scheduler_active ? '✅' : '❌'} Group ${g.id.toString().slice(0, 8)}`, `groupdetails_${g.id}`)
       ]);
       keyboard.push([Markup.button.callback("◀️ Back", "back_to_main")]);
-      await ctx.editMessageText("📦 Manage Groups (Click to view details):", { reply_markup: { inline_keyboard: keyboard } });
+      await ctx.editMessageText("📦 Manage Groups:", { reply_markup: { inline_keyboard: keyboard } });
       await ctx.answerCbQuery();
       return;
     }
-    
+
     if (action.startsWith("groupdetails_")) {
       const groupId = action.replace("groupdetails_", "");
-      
       const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-      if (!uuidRegex.test(groupId)) {
-        await ctx.answerCbQuery("❌ Invalid group ID - please refresh /admin");
-        return;
-      }
-      
-      const g = await q(`SELECT is_scheduler_active, daily_codes_limit, distribution_days, send_time FROM groups WHERE id=$1`, [groupId]);
+      if (!uuidRegex.test(groupId)) { await ctx.answerCbQuery("❌ Invalid group ID"); return; }
+      const g = await q(`SELECT is_scheduler_active, daily_codes_limit, distribution_days, send_time, payment_day FROM groups WHERE id=$1`, [groupId]);
       if (g.rowCount > 0) {
         const group = g.rows[0];
         const userCount = await q(`SELECT COUNT(*) FROM users WHERE group_id=$1`, [groupId]);
-        
         const keyboard = Markup.inlineKeyboard([
           [Markup.button.callback(`${group.is_scheduler_active ? '✅ Disable' : '❌ Enable'} Scheduler`, `grouptoggle_${groupId}`)],
           [Markup.button.callback(`📅 Set Days (${group.distribution_days})`, `groupdays_${groupId}`)],
@@ -1278,42 +1499,27 @@ bot.on("callback_query", async (ctx) => {
           [Markup.button.callback(`📢 Broadcast to Group`, `groupbroadcast_${groupId}`)],
           [Markup.button.callback("◀️ Back to Groups", "manage_groups")],
         ]);
-        
         await ctx.editMessageText(
-          `📦 Group ${groupId.slice(0, 8)}\n\n` +
-          `👥 Users: ${userCount.rows[0].count}\n` +
-          `🔄 Scheduler: ${group.is_scheduler_active ? '✅ Active' : '❌ Inactive'}\n` +
-          `📅 Distribution Days: ${group.distribution_days}\n` +
-          `👁️ Daily Limit: ${group.daily_codes_limit}\n` +
-          `⏰ Send Time: ${group.send_time}`,
+          `📦 Group ${groupId.slice(0, 8)}\n\n👥 Users: ${userCount.rows[0].count}\n🔄 Scheduler: ${group.is_scheduler_active ? '✅ Active' : '❌ Inactive'}\n📅 Days: ${group.distribution_days}\n👁️ Limit: ${group.daily_codes_limit}\n⏰ Time: ${group.send_time}\n💰 Payment Day: ${group.payment_day || 1}`,
           { reply_markup: keyboard.reply_markup }
         );
         await ctx.answerCbQuery();
-      } else {
-        await ctx.answerCbQuery("❌ Group not found");
       }
       return;
     }
-    
+
     if (action.startsWith("grouptoggle_")) {
       const groupId = action.replace("grouptoggle_", "");
-      
       const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-      if (!uuidRegex.test(groupId)) {
-        await ctx.answerCbQuery("❌ Invalid group ID");
-        return;
-      }
-      
+      if (!uuidRegex.test(groupId)) { await ctx.answerCbQuery("❌ Invalid group ID"); return; }
       const g = await q(`SELECT is_scheduler_active FROM groups WHERE id=$1`, [groupId]);
       if (g.rowCount > 0) {
         const newStatus = !g.rows[0].is_scheduler_active;
         await updateGroupSettings(groupId, 'is_scheduler_active', newStatus);
         await ctx.answerCbQuery(`✅ Scheduler ${newStatus ? 'Enabled' : 'Disabled'}`);
-        
-        const updated = await q(`SELECT is_scheduler_active, daily_codes_limit, distribution_days, send_time FROM groups WHERE id=$1`, [groupId]);
+        const updated = await q(`SELECT is_scheduler_active, daily_codes_limit, distribution_days, send_time, payment_day FROM groups WHERE id=$1`, [groupId]);
         const group = updated.rows[0];
         const userCount = await q(`SELECT COUNT(*) FROM users WHERE group_id=$1`, [groupId]);
-        
         const keyboard = Markup.inlineKeyboard([
           [Markup.button.callback(`${group.is_scheduler_active ? '✅ Disable' : '❌ Enable'} Scheduler`, `grouptoggle_${groupId}`)],
           [Markup.button.callback(`📅 Set Days (${group.distribution_days})`, `groupdays_${groupId}`)],
@@ -1322,68 +1528,69 @@ bot.on("callback_query", async (ctx) => {
           [Markup.button.callback(`📢 Broadcast to Group`, `groupbroadcast_${groupId}`)],
           [Markup.button.callback("◀️ Back to Groups", "manage_groups")],
         ]);
-        
         await ctx.editMessageText(
-          `📦 Group ${groupId.slice(0, 8)}\n\n` +
-          `👥 Users: ${userCount.rows[0].count}\n` +
-          `🔄 Scheduler: ${group.is_scheduler_active ? '✅ Active' : '❌ Inactive'}\n` +
-          `📅 Distribution Days: ${group.distribution_days}\n` +
-          `👁️ Daily Limit: ${group.daily_codes_limit}\n` +
-          `⏰ Send Time: ${group.send_time}`,
+          `📦 Group ${groupId.slice(0, 8)}\n\n👥 Users: ${userCount.rows[0].count}\n🔄 Scheduler: ${group.is_scheduler_active ? '✅ Active' : '❌ Inactive'}\n📅 Days: ${group.distribution_days}\n👁️ Limit: ${group.daily_codes_limit}\n⏰ Time: ${group.send_time}`,
           { reply_markup: keyboard.reply_markup }
         );
       }
       return;
     }
-    
+
     if (action.startsWith("groupdays_")) {
       const groupId = action.replace("groupdays_", "");
-      await safeReply(ctx, `📅 Use command: /gdays ${groupId.slice(0, 8)} 20\n\nExample: /gdays ${groupId.slice(0, 8)} 15`);
+      await safeReply(ctx, `📅 لتغيير عدد الأيام، أرسل:\n\n/gdays ${groupId.slice(0, 8)} 20`);
       await ctx.answerCbQuery();
       return;
     }
-    
+
     if (action.startsWith("grouplimit_")) {
       const groupId = action.replace("grouplimit_", "");
-      await safeReply(ctx, `👁️ Use command: /glimit ${groupId.slice(0, 8)} 50\n\nExample: /glimit ${groupId.slice(0, 8)} 60`);
+      await safeReply(ctx, `👁️ لتغيير الحد اليومي، أرسل:\n\n/glimit ${groupId.slice(0, 8)} 50`);
       await ctx.answerCbQuery();
       return;
     }
-    
+
     if (action.startsWith("grouptime_")) {
       const groupId = action.replace("grouptime_", "");
-      await safeReply(ctx, `⏰ Use command: /gtime ${groupId.slice(0, 8)} 09:00\n\nExample: /gtime ${groupId.slice(0, 8)} 15:30`);
+      await safeReply(ctx, `⏰ لتغيير وقت الإرسال، أرسل:\n\n/gtime ${groupId.slice(0, 8)} 09:00`);
       await ctx.answerCbQuery();
       return;
     }
-    
+
     if (action.startsWith("groupbroadcast_")) {
       const groupId = action.replace("groupbroadcast_", "");
       groupBroadcastMode[ctx.from.id.toString()] = groupId;
-      await safeReply(ctx, `📢 Send your message to broadcast to Group ${groupId.slice(0, 8)}:`);
+      await safeReply(ctx, `📢 أرسل الرسالة الآن لإرسالها لجميع أعضاء Group ${groupId.slice(0, 8)}:`);
       await ctx.answerCbQuery();
       return;
     }
-    
+
     if (action === "delete_cycle") {
-      const keyboard = Markup.inlineKeyboard([
-        [Markup.button.callback("⚠️ Confirm Delete", "confirm_delete_cycle")],
-        [Markup.button.callback("◀️ Cancel", "back_to_main")],
+      const confirmKeyboard = Markup.inlineKeyboard([
+        [
+          Markup.button.callback("⚠️ نعم، احذف كل شيء", "confirm_delete_cycle"),
+          Markup.button.callback("◀️ إلغاء", "back_to_main")
+        ]
       ]);
-      await ctx.editMessageText("⚠️ هل أنت متأكد من حذف كل الأكواد والتوزيعات؟", { reply_markup: keyboard.reply_markup });
+      await ctx.editMessageText(
+        `⚠️ تحذير!\n\nهل أنت متأكد من حذف جميع الأكواد والتوزيعات؟\n\n❌ هذا الإجراء لا يمكن التراجع عنه`,
+        { reply_markup: confirmKeyboard.reply_markup }
+      );
       await ctx.answerCbQuery();
       return;
     }
-    
+
     if (action === "confirm_delete_cycle") {
       await q("DELETE FROM code_view_assignments");
       await q("DELETE FROM codes");
       await q("DELETE FROM user_penalties");
-      await safeReply(ctx, "🗑️ تم حذف جميع الأكواد والتوزيعات!");
-      await ctx.answerCbQuery("✅ Deleted");
+      await q("DELETE FROM confirmation_penalties");
+      await q("DELETE FROM verification_penalties");
+      await safeReply(ctx, "🗑️ تم حذف جميع الأكواد والتوزيعات!\n\n✅ جاهز لدورة جديدة.");
+      await ctx.answerCbQuery("✅ تم الحذف");
       return;
     }
-    
+
     if (action === "payment_menu") {
       const keyboard = Markup.inlineKeyboard([
         [Markup.button.callback("📢 Send Payment Reminder (All)", "payment_remind_all")],
@@ -1397,164 +1604,106 @@ bot.on("callback_query", async (ctx) => {
       await ctx.answerCbQuery();
       return;
     }
-    
+
     if (action === "payment_resume_all") {
-      try {
-        await q(`UPDATE groups SET payment_mode_active=false, payment_mode_day=0, is_scheduler_active=true`);
-        await safeReply(ctx, `✅ تم استئناف التوزيع لجميع المجموعات\n\n▶️ التوزيع الآن نشط`);
-        await ctx.answerCbQuery();
-      } catch (err) {
-        console.error(err);
-        await ctx.answerCbQuery("❌ Error");
-      }
+      await q(`UPDATE groups SET payment_mode_active=false, payment_mode_day=0, is_scheduler_active=true`);
+      await safeReply(ctx, `✅ تم استئناف التوزيع لجميع المجموعات\n\n▶️ الأكواد ستُوزع في موعدها`);
+      await ctx.answerCbQuery("✅ تم استئناف التوزيع");
       return;
     }
-    
+
     if (action === "payment_remind_all") {
-      try {
-        const currentMonth = new Date().toISOString().slice(0, 7);
-        const users = await q(`SELECT u.telegram_id, u.auto_name, u.group_id FROM users u`);
-        
-        // تفعيل وضع الدفع لكل المجموعات
-        await q(`UPDATE groups SET payment_mode_active=true, payment_mode_started=NOW(), payment_mode_day=1, is_scheduler_active=false`);
-        
-        let success = 0;
-        for (const user of users.rows) {
-          try {
-            await bot.telegram.sendMessage(user.telegram_id, 
-              `💰 تذكير دفع الاشتراك الشهري\n\n` +
-              `📅 الشهر: ${currentMonth}\n` +
-              `👤 ${user.auto_name}\n\n` +
-              `⏸️ تم إيقاف توزيع الأكواد مؤقتاً\n\n` +
-              `📸 يرجى إرسال إثبات الدفع عبر زر "📸 إرسال إثبات الدفع"\n\n` +
-              `⚠️ لديك 3 أيام لإرسال الإثبات\n` +
-              `⏰ عدم الدفع خلال 3 أيام = حظر نهائي`
-            );
-            success++;
-            await new Promise(r => setTimeout(r, 100));
-          } catch (e) {
-            console.error(`Failed to send to ${user.telegram_id}`);
-          }
-        }
-        
-        await q(`UPDATE groups SET last_payment_reminder=NOW()`);
-        await safeReply(ctx, `✅ تم إرسال التذكير لـ ${success} مستخدم\n\n⏸️ تم إيقاف التوزيع لجميع المجموعات`);
-        await ctx.answerCbQuery();
-      } catch (err) {
-        console.error(err);
-        await ctx.answerCbQuery("❌ Error");
+      const currentMonth = new Date().toISOString().slice(0, 7);
+      const users = await q(`SELECT u.telegram_id, u.auto_name FROM users u`);
+      await q(`UPDATE groups SET payment_mode_active=true, payment_mode_started=NOW(), payment_mode_day=1, is_scheduler_active=false`);
+      let success = 0;
+      for (const user of users.rows) {
+        try {
+          await bot.telegram.sendMessage(user.telegram_id, 
+            `💰 تذكير دفع الاشتراك الشهري\n\n` +
+            `📅 الشهر: ${currentMonth}\n` +
+            `👤 ${user.auto_name}\n\n` +
+            `⏸️ تم إيقاف توزيع الأكواد مؤقتاً\n\n` +
+            `📸 يرجى إرسال إثبات الدفع عبر زر "📸 إرسال إثبات الدفع"\n\n` +
+            `⚠️ لديك 3 أيام لإرسال الإثبات`
+          );
+          success++;
+          await new Promise(r => setTimeout(r, 100));
+        } catch (e) {}
       }
+      await q(`UPDATE groups SET last_payment_reminder=NOW()`);
+      await safeReply(ctx, `✅ تم إرسال التذكير لـ ${success} مستخدم\n\n⏸️ تم إيقاف التوزيع حتى استلام الدفعات`);
+      await ctx.answerCbQuery();
       return;
     }
-    
+
     if (action === "payment_status") {
-      try {
-        const currentMonth = new Date().toISOString().slice(0, 7);
-        const total = await q(`SELECT COUNT(*) FROM users`);
-        const paid = await q(`SELECT COUNT(*) FROM payments WHERE payment_month=$1 AND proof_sent=true`, [currentMonth]);
-        
-        const groups = await q(`
-          SELECT g.id, g.name, 
-                 COUNT(u.id) as total_users,
-                 COUNT(p.id) FILTER (WHERE p.proof_sent=true) as paid_users
-          FROM groups g
-          LEFT JOIN users u ON u.group_id = g.id
-          LEFT JOIN payments p ON p.user_id = u.id AND p.payment_month = $1
-          GROUP BY g.id, g.name
-          ORDER BY g.created_at
-        `, [currentMonth]);
-        
-        let message = `💰 حالة الدفع - ${currentMonth}\n\n`;
-        message += `📊 الإجمالي: ${paid.rows[0].count}/${total.rows[0].count} دفعوا\n\n`;
-        message += `📦 حسب المجموعات:\n\n`;
-        
-        groups.rows.forEach(g => {
-          const paidCount = parseInt(g.paid_users) || 0;
-          const totalCount = parseInt(g.total_users) || 0;
-          const percentage = totalCount > 0 ? Math.round((paidCount / totalCount) * 100) : 0;
-          message += `• Group ${g.id.toString().slice(0, 8)}: ${paidCount}/${totalCount} (${percentage}%)\n`;
-        });
-        
-        await safeReply(ctx, message);
-        await ctx.answerCbQuery();
-      } catch (err) {
-        console.error(err);
-        await ctx.answerCbQuery("❌ Error");
-      }
+      const currentMonth = new Date().toISOString().slice(0, 7);
+      const total = await q(`SELECT COUNT(*) FROM users`);
+      const paid = await q(`SELECT COUNT(*) FROM payments WHERE payment_month=$1 AND proof_sent=true`, [currentMonth]);
+      const groups = await q(
+        `SELECT g.id, COUNT(u.id) as total_users, COUNT(p.id) FILTER (WHERE p.proof_sent=true) as paid_users
+         FROM groups g LEFT JOIN users u ON u.group_id = g.id LEFT JOIN payments p ON p.user_id = u.id AND p.payment_month = $1
+         GROUP BY g.id ORDER BY g.created_at`,
+        [currentMonth]
+      );
+      let message = `💰 حالة الدفع - ${currentMonth}\n\n📊 الإجمالي: ${paid.rows[0].count}/${total.rows[0].count}\n\n📦 حسب المجموعات:\n\n`;
+      groups.rows.forEach(g => {
+        const paidCount = parseInt(g.paid_users) || 0;
+        const totalCount = parseInt(g.total_users) || 0;
+        const rate = totalCount > 0 ? Math.round((paidCount/totalCount)*100) : 0;
+        message += `• Group ${g.id.toString().slice(0, 8)}: ${paidCount}/${totalCount} (${rate}%)\n`;
+      });
+      await safeReply(ctx, message);
+      await ctx.answerCbQuery();
       return;
     }
-    
+
     if (action === "payment_nonpayers") {
-      try {
-        const currentMonth = new Date().toISOString().slice(0, 7);
-        const nonPayers = await q(`
-          SELECT u.id, u.auto_name, u.telegram_id, u.group_id, u.phone
-          FROM users u
-          LEFT JOIN payments p ON p.user_id = u.id AND p.payment_month = $1
-          WHERE p.id IS NULL OR p.proof_sent = false
-          ORDER BY u.group_id, u.auto_name
-        `, [currentMonth]);
-        
-        if (nonPayers.rowCount === 0) {
-          await ctx.answerCbQuery("✅ الجميع دفع!");
-          return;
-        }
-        
-        let message = `⚠️ قائمة من لم يدفع - ${currentMonth}\n`;
-        message += `📊 العدد: ${nonPayers.rowCount}\n\n`;
-        
-        const byGroup = {};
-        nonPayers.rows.forEach(u => {
-          const gid = u.group_id.toString().slice(0, 8);
-          if (!byGroup[gid]) byGroup[gid] = [];
-          byGroup[gid].push(u);
-        });
-        
-        for (const [gid, users] of Object.entries(byGroup)) {
-          message += `📦 Group ${gid}:\n`;
-          users.forEach(u => {
-            message += `  • ${u.auto_name} (${u.phone || 'N/A'})\n`;
-          });
-          message += `\n`;
-        }
-        
-        message += `━━━━━━━━━━━━━━\n\n`;
-        message += `استخدم:\n`;
-        message += `/warn_nonpayers - تحذير الجميع\n`;
-        message += `/banuser <name> سبب - حظر مستخدم`;
-        
-        await safeReply(ctx, message);
-        await ctx.answerCbQuery();
-      } catch (err) {
-        console.error(err);
-        await ctx.answerCbQuery("❌ Error");
-      }
-      return;
-    }
-    
-    if (action === "payment_groups") {
-      const groups = await q(`SELECT id, name, payment_day FROM groups ORDER BY created_at`);
-      if (groups.rowCount === 0) {
-        await ctx.answerCbQuery("لا توجد مجموعات");
+      const currentMonth = new Date().toISOString().slice(0, 7);
+      const nonPayers = await q(
+        `SELECT u.auto_name, u.phone, u.group_id FROM users u
+         LEFT JOIN payments p ON p.user_id = u.id AND p.payment_month = $1
+         WHERE p.id IS NULL OR p.proof_sent = false ORDER BY u.group_id, u.auto_name`,
+        [currentMonth]
+      );
+      if (nonPayers.rowCount === 0) {
+        await ctx.answerCbQuery("✅ الجميع دفع!");
         return;
       }
+      let message = `⚠️ قائمة من لم يدفع - ${currentMonth}\n📊 العدد: ${nonPayers.rowCount}\n\n`;
+      const byGroup = {};
+      nonPayers.rows.forEach(u => {
+        const gid = u.group_id.toString().slice(0, 8);
+        if (!byGroup[gid]) byGroup[gid] = [];
+        byGroup[gid].push(u);
+      });
+      for (const [gid, users] of Object.entries(byGroup)) {
+        message += `📦 Group ${gid}:\n`;
+        users.forEach(u => { message += `  • ${u.auto_name} (${u.phone || 'N/A'})\n`; });
+        message += `\n`;
+      }
+      await safeReply(ctx, message);
+      await ctx.answerCbQuery();
+      return;
+    }
+
+    if (action === "payment_groups") {
+      const groups = await q(`SELECT id, name, payment_day FROM groups ORDER BY created_at`);
+      if (groups.rowCount === 0) { await ctx.answerCbQuery("لا توجد مجموعات"); return; }
       const keyboard = groups.rows.map(g => [
         Markup.button.callback(`Group ${g.id.toString().slice(0, 8)} (Day: ${g.payment_day || 1})`, `payment_group_${g.id}`)
       ]);
       keyboard.push([Markup.button.callback("◀️ Back", "payment_menu")]);
-      await ctx.editMessageText("📦 اختر مجموعة لإدارة الدفع:", { reply_markup: { inline_keyboard: keyboard } });
+      await ctx.editMessageText("📦 اختر مجموعة:", { reply_markup: { inline_keyboard: keyboard } });
       await ctx.answerCbQuery();
       return;
     }
-    
+
     if (action.startsWith("payment_group_")) {
       const groupId = action.replace("payment_group_", "");
       const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-      if (!uuidRegex.test(groupId)) {
-        await ctx.answerCbQuery("❌ Invalid group ID");
-        return;
-      }
-      
+      if (!uuidRegex.test(groupId)) { await ctx.answerCbQuery("❌ Invalid group ID"); return; }
       const g = await q(`SELECT payment_day, payment_mode_active FROM groups WHERE id=$1`, [groupId]);
       if (g.rowCount > 0) {
         const keyboard = Markup.inlineKeyboard([
@@ -1563,90 +1712,86 @@ bot.on("callback_query", async (ctx) => {
           [Markup.button.callback(`📅 Set Payment Day (${g.rows[0].payment_day})`, `payment_setday_${groupId}`)],
           [Markup.button.callback("◀️ Back", "payment_groups")],
         ]);
-        const status = g.rows[0].payment_mode_active ? "⏸️ Paused" : "▶️ Active";
-        await ctx.editMessageText(`💰 Payment Settings - Group ${groupId.slice(0, 8)}\n\nPayment Day: ${g.rows[0].payment_day}\nDistribution: ${status}`, { reply_markup: keyboard.reply_markup });
+        await ctx.editMessageText(
+          `💰 Payment Settings\nGroup ${groupId.slice(0, 8)}\n\nPayment Day: ${g.rows[0].payment_day}\nStatus: ${g.rows[0].payment_mode_active ? "⏸️ Paused" : "▶️ Active"}`,
+          { reply_markup: keyboard.reply_markup }
+        );
         await ctx.answerCbQuery();
       }
       return;
     }
-    
+
     if (action.startsWith("payment_resume_group_")) {
       const groupId = action.replace("payment_resume_group_", "");
-      try {
-        await q(`UPDATE groups SET payment_mode_active=false, payment_mode_day=0, is_scheduler_active=true WHERE id=$1`, [groupId]);
-        await safeReply(ctx, `✅ تم استئناف التوزيع للمجموعة ${groupId.slice(0, 8)}\n\n▶️ التوزيع الآن نشط`);
-        await ctx.answerCbQuery();
-      } catch (err) {
-        console.error(err);
-        await ctx.answerCbQuery("❌ Error");
-      }
-      return;
-    }
-    
-    if (action.startsWith("payment_remind_group_")) {
-      const groupId = action.replace("payment_remind_group_", "");
-      try {
-        const currentMonth = new Date().toISOString().slice(0, 7);
-        const users = await q(`SELECT telegram_id, auto_name FROM users WHERE group_id=$1`, [groupId]);
-        
-        // تفعيل وضع الدفع لهذه المجموعة فقط
-        await q(`UPDATE groups SET payment_mode_active=true, payment_mode_started=NOW(), payment_mode_day=1, is_scheduler_active=false WHERE id=$1`, [groupId]);
-        
-        let success = 0;
-        for (const user of users.rows) {
-          try {
-            await bot.telegram.sendMessage(user.telegram_id, 
-              `💰 تذكير دفع الاشتراك الشهري\n\n` +
-              `📅 الشهر: ${currentMonth}\n` +
-              `👤 ${user.auto_name}\n\n` +
-              `⏸️ تم إيقاف توزيع الأكواد مؤقتاً\n\n` +
-              `📸 يرجى إرسال إثبات الدفع عبر زر "📸 إرسال إثبات الدفع"\n\n` +
-              `⚠️ لديك 3 أيام لإرسال الإثبات\n` +
-              `⏰ عدم الدفع خلال 3 أيام = حظر نهائي`
-            );
-            success++;
-            await new Promise(r => setTimeout(r, 100));
-          } catch (e) {
-            console.error(`Failed to send to ${user.telegram_id}`);
-          }
-        }
-        
-        await q(`UPDATE groups SET last_payment_reminder=NOW() WHERE id=$1`, [groupId]);
-        await safeReply(ctx, `✅ تم إرسال التذكير لـ ${success} مستخدم في Group ${groupId.slice(0, 8)}\n\n⏸️ تم إيقاف التوزيع لهذه المجموعة`);
-        await ctx.answerCbQuery();
-      } catch (err) {
-        console.error(err);
-        await ctx.answerCbQuery("❌ Error");
-      }
-      return;
-    }
-    
-    if (action.startsWith("payment_setday_")) {
-      const groupId = action.replace("payment_setday_", "");
-      await safeReply(ctx, `📅 لتحديد يوم الدفع، استخدم:\n\n/set_payment_day ${groupId.slice(0, 8)} 15\n\nمثال: /set_payment_day ${groupId.slice(0, 8)} 1`);
+      await q(`UPDATE groups SET payment_mode_active=false, payment_mode_day=0, is_scheduler_active=true WHERE id=$1`, [groupId]);
+      await safeReply(ctx, `✅ تم استئناف التوزيع للمجموعة ${groupId.slice(0, 8)}`);
       await ctx.answerCbQuery();
       return;
     }
-    
+
+    if (action.startsWith("payment_remind_group_")) {
+      const groupId = action.replace("payment_remind_group_", "");
+      const currentMonth = new Date().toISOString().slice(0, 7);
+      const users = await q(`SELECT telegram_id, auto_name FROM users WHERE group_id=$1`, [groupId]);
+      await q(`UPDATE groups SET payment_mode_active=true, payment_mode_started=NOW(), payment_mode_day=1, is_scheduler_active=false WHERE id=$1`, [groupId]);
+      let success = 0;
+      for (const user of users.rows) {
+        try {
+          await bot.telegram.sendMessage(user.telegram_id,
+            `💰 تذكير دفع الاشتراك الشهري\n\n` +
+            `📅 الشهر: ${currentMonth}\n` +
+            `👤 ${user.auto_name}\n\n` +
+            `⏸️ تم إيقاف توزيع الأكواد مؤقتاً\n\n` +
+            `📸 يرجى إرسال إثبات الدفع`
+          );
+          success++;
+          await new Promise(r => setTimeout(r, 100));
+        } catch (e) {}
+      }
+      await q(`UPDATE groups SET last_payment_reminder=NOW() WHERE id=$1`, [groupId]);
+      await safeReply(ctx, `✅ تم إرسال التذكير لـ ${success} مستخدم في Group ${groupId.slice(0, 8)}`);
+      await ctx.answerCbQuery();
+      return;
+    }
+
+    if (action.startsWith("payment_setday_")) {
+      const groupId = action.replace("payment_setday_", "");
+      await safeReply(ctx, `📅 لتعيين يوم الدفع، أرسل:\n\n/set_payment_day ${groupId.slice(0, 8)} 15`);
+      await ctx.answerCbQuery();
+      return;
+    }
+
     if (action === "blacklist_menu") {
       const keyboard = Markup.inlineKeyboard([
         [Markup.button.callback("➕ Add to Blacklist", "blacklist_add")],
         [Markup.button.callback("📋 View Blacklist", "blacklist_view")],
         [Markup.button.callback("🗑️ Remove from Blacklist", "blacklist_remove")],
-        [Markup.button.callback("👤 Ban User", "blacklist_ban_user")],
+        [Markup.button.callback("👤 Ban User Completely", "blacklist_ban_user")],
         [Markup.button.callback("◀️ Back", "back_to_main")],
       ]);
       await ctx.editMessageText("🚫 Blacklist Management:", { reply_markup: keyboard.reply_markup });
       await ctx.answerCbQuery();
       return;
     }
-    
+
     if (action === "blacklist_add") {
-      await safeReply(ctx, "➕ لإضافة للقائمة السوداء، استخدم:\n\n/ban <phone> <reason>\n\nمثال:\n/ban +201234567890 لم يدفع الاشتراك");
+      await safeReply(ctx, "➕ لإضافة للقائمة السوداء:\n\n/ban +201234567890 سبب الحظر");
       await ctx.answerCbQuery();
       return;
     }
-    
+
+    if (action === "blacklist_remove") {
+      await safeReply(ctx, "🗑️ لإزالة من القائمة السوداء:\n\n/unban +201234567890");
+      await ctx.answerCbQuery();
+      return;
+    }
+
+    if (action === "blacklist_ban_user") {
+      await safeReply(ctx, "👤 لحظر مستخدم مسجل:\n\n/banuser User5 سبب الحظر");
+      await ctx.answerCbQuery();
+      return;
+    }
+
     if (action === "blacklist_view") {
       const blacklist = await q(`SELECT * FROM blacklist ORDER BY banned_at DESC LIMIT 20`);
       if (blacklist.rowCount === 0) {
@@ -1655,33 +1800,18 @@ bot.on("callback_query", async (ctx) => {
       }
       let message = "🚫 القائمة السوداء:\n\n";
       blacklist.rows.forEach((item, i) => {
-        message += `${i + 1}. 📱 ${item.phone || 'N/A'}\n`;
-        message += `   🆔 ${item.telegram_id || 'N/A'}\n`;
-        message += `   📋 ${item.reason || 'غير محدد'}\n`;
-        message += `   📅 ${new Date(item.banned_at).toLocaleDateString('ar-EG')}\n\n`;
+        message += `${i + 1}. 📱 ${item.phone || 'N/A'}\n   🆔 ${item.telegram_id || 'N/A'}\n   📋 ${item.reason || 'غير محدد'}\n\n`;
       });
       await safeReply(ctx, message);
       await ctx.answerCbQuery();
       return;
     }
-    
-    if (action === "blacklist_remove") {
-      await safeReply(ctx, "🗑️ لإزالة من القائمة السوداء، استخدم:\n\n/unban <phone_or_telegram_id>\n\nمثال:\n/unban +201234567890");
-      await ctx.answerCbQuery();
-      return;
-    }
-    
-    if (action === "blacklist_ban_user") {
-      await safeReply(ctx, "👤 لحظر مستخدم مسجل، استخدم:\n\n/banuser <user_name_or_phone> <reason>\n\nمثال:\n/banuser User5 غير نزيه في الاستخدام\n\nسيتم:\n✅ حذف حسابه\n✅ إضافته للقائمة السوداء\n✅ منعه من التسجيل مرة أخرى");
-      await ctx.answerCbQuery();
-      return;
-    }
-    
+
     if (action === "toggle_penalties") {
       const s = await getAdminSettings();
-      await updateAdminSettings("penalties_active", !s.penalties_active);
-      await ctx.answerCbQuery(`✅ Penalties ${!s.penalties_active ? 'Enabled' : 'Disabled'}`);
-      
+      const newVal = !s.penalties_active;
+      await updateAdminSettings("penalties_active", newVal);
+      await ctx.answerCbQuery(`✅ Penalties ${newVal ? 'Enabled' : 'Disabled'}`);
       const updated = await getAdminSettings();
       const keyboard = Markup.inlineKeyboard([
         [Markup.button.callback("📴 Toggle All Schedulers", "toggle_all_schedulers")],
@@ -1692,13 +1822,73 @@ bot.on("callback_query", async (ctx) => {
         [Markup.button.callback("📅 Set Days", "set_days")],
         [Markup.button.callback("👥 Set Group Size", "set_group")],
         [Markup.button.callback("🔢 Set Max Groups", "set_max_groups")],
-        [Markup.button.callback("📢 Broadcast", "broadcast")],
+        [Markup.button.callback("📢 Broadcast to All", "broadcast")],
         [Markup.button.callback("◀️ Back", "back_to_main")],
       ]);
-      await ctx.editMessageText(`🌐 Global Settings\n\nPenalties System: ${updated.penalties_active ? '✅ Active' : '❌ Inactive'}`, { reply_markup: keyboard.reply_markup });
+      await ctx.editMessageText(
+        `🌐 Global Settings\n\nPenalties System: ${updated.penalties_active ? '✅ Active' : '❌ Inactive'}`,
+        { reply_markup: keyboard.reply_markup }
+      );
       return;
     }
-    
+
+    if (action === "toggle_all_schedulers") {
+      const s = await getAdminSettings();
+      const newVal = !s.is_scheduler_active;
+      await updateAdminSettings("is_scheduler_active", newVal);
+      await q("UPDATE groups SET is_scheduler_active = $1", [newVal]);
+      await safeReply(ctx, `✅ All Schedulers: ${newVal ? "✅ Enabled" : "❌ Disabled"}`);
+      await ctx.answerCbQuery(`✅ ${newVal ? 'Enabled' : 'Disabled'}`);
+      return;
+    }
+
+    if (action === "distribute_now") {
+      await runDailyDistribution();
+      await safeReply(ctx, "✅ تم توزيع الأكواد يدوياً!");
+      await ctx.answerCbQuery("✅ Done");
+      return;
+    }
+
+    if (action === "set_time") { await safeReply(ctx, "⏰ لتغيير وقت الإرسال:\n\n/set_time 09:00"); await ctx.answerCbQuery(); return; }
+    if (action === "set_limit") { await safeReply(ctx, "👁️ لتغيير الحد اليومي:\n\n/set_limit 50"); await ctx.answerCbQuery(); return; }
+    if (action === "set_days") { await safeReply(ctx, "📅 لتغيير عدد الأيام:\n\n/set_days 20"); await ctx.answerCbQuery(); return; }
+    if (action === "set_group") { await safeReply(ctx, "👥 لتغيير حجم المجموعة:\n\n/set_group 1000"); await ctx.answerCbQuery(); return; }
+    if (action === "set_max_groups") { await safeReply(ctx, "🔢 لتحديد الحد الأقصى للمجموعات:\n\n/set_max_groups 10\n\nأو لعدم تحديد حد:\n/set_max_groups NULL"); await ctx.answerCbQuery(); return; }
+
+    if (action === "broadcast") {
+      adminBroadcastMode = true;
+      await safeReply(ctx, "📢 أرسل الرسالة الآن لإرسالها لجميع المستخدمين:");
+      await ctx.answerCbQuery();
+      return;
+    }
+
+    if (action === "stats") {
+      const totalUsers = await q(`SELECT COUNT(*) FROM users`);
+      const activeCodes = await q(`SELECT COUNT(*) FROM codes WHERE status='active'`);
+      const totalGroups = await q(`SELECT COUNT(*) FROM groups`);
+      const blacklisted = await q(`SELECT COUNT(*) FROM blacklist`);
+      const s = await getAdminSettings();
+      const today = new Date().toISOString().slice(0, 10);
+      const completedToday = await q(`SELECT COUNT(DISTINCT assigned_to_user_id) FROM code_view_assignments WHERE assigned_date=$1 AND used=true`, [today]);
+      const totalToday = await q(`SELECT COUNT(DISTINCT assigned_to_user_id) FROM code_view_assignments WHERE assigned_date=$1`, [today]);
+      
+      const statsMessage = `📊 إحصائيات البوت:\n\n` +
+        `👥 المستخدمون: ${totalUsers.rows[0].count}\n` +
+        `📦 الأكواد النشطة: ${activeCodes.rows[0].count}\n` +
+        `🏢 المجموعات: ${totalGroups.rows[0].count}\n` +
+        `🚫 المحظورون: ${blacklisted.rows[0].count}\n` +
+        `🔢 الحد الأقصى للمجموعات: ${s.max_groups || 'غير محدد'}\n\n` +
+        `📅 اليوم:\n` +
+        `✅ أكملوا: ${completedToday.rows[0].count}/${totalToday.rows[0].count}\n\n` +
+        `⚙️ الإعدادات:\n` +
+        `🔄 الجدول: ${s.is_scheduler_active ? '✅ نشط' : '❌ متوقف'}\n` +
+        `⚖️ العقوبات: ${s.penalties_active ? '✅ نشطة' : '❌ متوقفة'}`;
+      
+      await safeReply(ctx, statsMessage);
+      await ctx.answerCbQuery();
+      return;
+    }
+
     if (action === "back_to_main") {
       const keyboard = Markup.inlineKeyboard([
         [Markup.button.callback("🌐 Global Settings", "global_settings")],
@@ -1712,43 +1902,15 @@ bot.on("callback_query", async (ctx) => {
       await ctx.answerCbQuery();
       return;
     }
-    
-    if (action === "toggle_all_schedulers") {
-      const s = await getAdminSettings();
-      await updateAdminSettings("is_scheduler_active", !s.is_scheduler_active);
-      await q("UPDATE groups SET is_scheduler_active = $1", [!s.is_scheduler_active]);
-      await safeReply(ctx, `✅ All Schedulers: ${!s.is_scheduler_active ? "Enabled" : "Disabled"}`);
-    } else if (action === "distribute_now") {
-      console.log("🔄 Manual distribution started");
-      await runDailyDistribution();
-      await safeReply(ctx, "✅ تم توزيع الأكواد يدوياً!");
-    } else if (action === "set_time") {
-      await safeReply(ctx, "⏰ Send: /set_time 21:00");
-    } else if (action === "set_limit") {
-      await safeReply(ctx, "👁️ Send: /set_limit 50");
-    } else if (action === "set_days") {
-      await safeReply(ctx, "📅 Send: /set_days 20");
-    } else if (action === "set_group") {
-      await safeReply(ctx, "👥 Send: /set_group 1000");
-    } else if (action === "set_max_groups") {
-      await safeReply(ctx, "🔢 Send: /set_max_groups 10 (or NULL)");
-    } else if (action === "broadcast") {
-      adminBroadcastMode = true;
-      await safeReply(ctx, "📢 Send message to broadcast:");
-    } else if (action === "stats") {
-      const u = await q(`SELECT COUNT(*) FROM users`);
-      const c = await q(`SELECT COUNT(*) FROM codes WHERE status='active'`);
-      const g = await q(`SELECT COUNT(*) FROM groups`);
-      const bl = await q(`SELECT COUNT(*) FROM blacklist`);
-      const s = await getAdminSettings();
-      await safeReply(ctx, `📊 Stats:\n\nUsers: ${u.rows[0].count}\nActive Codes: ${c.rows[0].count}\nGroups: ${g.rows[0].count}\nBlacklisted: ${bl.rows[0].count}\nMax Groups: ${s.max_groups || 'Unlimited'}\nScheduler: ${s.is_scheduler_active ? "On" : "Off"}\nPenalties: ${s.penalties_active ? "On" : "Off"}\n\n💡 Tip: Use /banuser to ban users`);
-    }
+
     await ctx.answerCbQuery();
   } catch (err) {
-    console.error("❌ callback error:", err.message);
-    await ctx.answerCbQuery();
+    console.error("❌ Admin callback error:", err.message);
+    try { await ctx.answerCbQuery("❌ حدث خطأ"); } catch (e) {}
   }
 });
+
+// ==================== CRON JOBS & DISTRIBUTION ====================
 
 async function runDailyDistribution() {
   console.log("📦 بدء توزيع الأكواد...");
@@ -1825,6 +1987,110 @@ async function runDailyDistribution() {
     console.log(`✅ Distribution complete`);
   } catch (err) {
     console.error("❌ runDailyDistribution:", err.message);
+  }
+}
+
+// 🆕 دالة التأكيد التلقائي عند بداية التوزيع
+async function autoConfirmPendingVerifications() {
+  console.log("🔄 Auto-confirming pending verifications...");
+  try {
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    const yesterdayStr = yesterday.toISOString().slice(0, 10);
+    
+    // الحصول على جميع الأكواد التي لم يتم التأكيد عليها من الأمس
+    const unverifiedAssignments = await q(
+      `SELECT DISTINCT c.owner_id, u.telegram_id
+       FROM code_view_assignments a
+       JOIN codes c ON a.code_id = c.id
+       JOIN users u ON c.owner_id = u.id
+       WHERE a.assigned_date = $1 AND a.used = true AND a.verified = false`,
+      [yesterdayStr]
+    );
+    
+    // تأكيد جميع الأكواد تلقائياً
+    await q(
+      `UPDATE code_view_assignments 
+       SET verified = true 
+       WHERE assigned_date = $1 AND used = true AND verified = false`,
+      [yesterdayStr]
+    );
+    
+    console.log(`✅ Auto-confirmed ${unverifiedAssignments.rowCount} pending verifications`);
+    
+    // تطبيق عقوبات على من لم يؤكد
+    for (const row of unverifiedAssignments.rows) {
+      const ownerId = row.owner_id;
+      const ownerTelegramId = row.telegram_id;
+      
+      // التحقق من عقوبات التأكيد السابقة
+      const existingPenalty = await q(
+        `SELECT no_confirmation_count FROM confirmation_penalties WHERE user_id=$1`,
+        [ownerId]
+      );
+      
+      let noConfirmCount = 1;
+      if (existingPenalty.rowCount > 0) {
+        noConfirmCount = existingPenalty.rows[0].no_confirmation_count + 1;
+        await q(
+          `UPDATE confirmation_penalties SET no_confirmation_count=$1, last_missed=NOW() WHERE user_id=$2`,
+          [noConfirmCount, ownerId]
+        );
+      } else {
+        await q(
+          `INSERT INTO confirmation_penalties (user_id, no_confirmation_count, last_missed) VALUES ($1, 1, NOW())`,
+          [ownerId]
+        );
+      }
+      
+      // تطبيق العقوبة
+      let penaltyMessage = "";
+      if (noConfirmCount === 1) {
+        // حجب الأكواد ليوم واحد
+        await q(
+          `UPDATE codes SET status='suspended', suspension_until=(NOW() + INTERVAL '1 day')
+           WHERE owner_id=$1 AND status='active'`,
+          [ownerId]
+        );
+        penaltyMessage = `⚠️ لم تقم بتأكيد من استخدم أكوادك أمس!\n\n` +
+          `🚫 العقوبة: حجب أكوادك لمدة يوم واحد\n\n` +
+          `⚠️ هذه المرة الأولى - كن حذراً!\n` +
+          `💡 يجب تأكيد الأكواد يومياً عبر زر "✅ تأكيد الاستخدام"`;
+      } else if (noConfirmCount === 2) {
+        // حجب الأكواد ليومين
+        await q(
+          `UPDATE codes SET status='suspended', suspension_until=(NOW() + INTERVAL '2 days')
+           WHERE owner_id=$1 AND status='active'`,
+          [ownerId]
+        );
+        penaltyMessage = `⚠️ لم تقم بتأكيد من استخدم أكوادك مرة ثانية!\n\n` +
+          `🚫 العقوبة: حجب أكوادك لمدة يومين\n\n` +
+          `⚠️ هذا تحذير نهائي!\n` +
+          `💡 المرة القادمة = حذف الحساب نهائياً`;
+      } else if (noConfirmCount >= 3) {
+        // حذف المستخدم نهائياً
+        await q(`DELETE FROM codes WHERE owner_id=$1`, [ownerId]);
+        await q(`DELETE FROM code_view_assignments WHERE assigned_to_user_id=$1`, [ownerId]);
+        await q(`DELETE FROM confirmation_penalties WHERE user_id=$1`, [ownerId]);
+        await q(`DELETE FROM verification_penalties WHERE user_id=$1`, [ownerId]);
+        await q(`DELETE FROM user_penalties WHERE user_id=$1`, [ownerId]);
+        await q(`DELETE FROM users WHERE id=$1`, [ownerId]);
+        
+        penaltyMessage = `🚫 تم حذف حسابك نهائياً من البوت!\n\n` +
+          `❌ السبب: عدم تأكيد الأكواد 3 مرات\n\n` +
+          `⚠️ تم حذف جميع أكوادك وحسابك\n` +
+          `💡 لا يمكنك التسجيل مرة أخرى`;
+      }
+      
+      // إرسال رسالة للمستخدم
+      try {
+        await bot.telegram.sendMessage(ownerTelegramId, penaltyMessage);
+      } catch (e) {
+        console.log(`Could not send no-confirmation penalty to ${ownerTelegramId}`);
+      }
+    }
+  } catch (err) {
+    console.error("❌ autoConfirmPendingVerifications:", err.message);
   }
 }
 
@@ -1937,21 +2203,11 @@ async function sendMotivationalReminders() {
 async function reactivateSuspendedCodes() {
   console.log("🔄 Reactivating suspended codes after penalty period...");
   try {
-    const twoDaysAgo = new Date();
-    twoDaysAgo.setDate(twoDaysAgo.getDate() - 2);
-    const twoDaysAgoStr = twoDaysAgo.toISOString().slice(0, 10);
-
-    const penalties = await q(
-      `SELECT user_id FROM user_penalties 
-       WHERE codes_deleted=true AND penalty_date <= $1`,
-      [twoDaysAgoStr]
+    await q(
+      `UPDATE codes SET status='active', suspension_until=NULL 
+       WHERE status='suspended' AND suspension_until IS NOT NULL AND suspension_until <= NOW()`
     );
-
-    for (const row of penalties.rows) {
-      await q(`UPDATE codes SET status='active' WHERE owner_id=$1 AND status='suspended'`, [row.user_id]);
-      await q(`DELETE FROM user_penalties WHERE user_id=$1`, [row.user_id]);
-      console.log(`✅ Reactivated codes for user ${row.user_id}`);
-    }
+    console.log(`✅ Reactivated codes after suspension period`);
   } catch (err) {
     console.error("❌ reactivateSuspendedCodes:", err.message);
   }
@@ -1995,8 +2251,7 @@ cron.schedule("0 20 * * *", async () => {
     );
     
     const message = `⏰ تذكير: هل استخدمت الكود؟\n\n` +
-                   `✅ إذا استخدمته: اضغط "تم الاستخدام"\n` +
-                   `📸 و أرسل screenshot\n\n` +
+                   `✅ إذا استخدمته: اضغط "تم الاستخدام"\n\n` +
                    `⚠️ المهلة: حتى منتصف الليل`;
     
     for (const row of incompleteUsers.rows) {
@@ -2045,16 +2300,11 @@ cron.schedule("0 0 * * *", async () => {
           // حذف كامل للمستخدم
           console.log(`🗑️ Deleting user ${row.user_id} after 3 days penalty`);
           
-          // 1. حذف كل الأكواد
           await q(`DELETE FROM codes WHERE owner_id=$1`, [row.user_id]);
-          
-          // 2. حذف كل التوزيعات
           await q(`DELETE FROM code_view_assignments WHERE assigned_to_user_id=$1`, [row.user_id]);
-          
-          // 3. حذف العقوبات
           await q(`DELETE FROM user_penalties WHERE user_id=$1`, [row.user_id]);
-          
-          // 4. حذف المستخدم نفسه
+          await q(`DELETE FROM confirmation_penalties WHERE user_id=$1`, [row.user_id]);
+          await q(`DELETE FROM verification_penalties WHERE user_id=$1`, [row.user_id]);
           await q(`DELETE FROM users WHERE id=$1`, [row.user_id]);
           
           console.log(`✅ User ${row.user_id} deleted completely from database`);
@@ -2075,7 +2325,7 @@ cron.schedule("0 0 * * *", async () => {
   }
 });
 
-// 4️⃣ التوزيع اليومي (يعمل كل دقيقة ويتحقق من وقت كل مجموعة)
+// 4️⃣ التوزيع اليومي (يعمل كل دقيقة ويتحقق من وقت كل مجموعة) + التأكيد التلقائي
 cron.schedule("* * * * *", async () => {
   try {
     const groups = await q(`SELECT id, send_time, is_scheduler_active FROM groups WHERE is_scheduler_active=true`);
@@ -2088,6 +2338,11 @@ cron.schedule("* * * * *", async () => {
       
       if (currentHour === targetHour && currentMinute === targetMinute) {
         console.log(`🌅 Running distribution for group ${group.id} at ${group.send_time}`);
+        
+        // 🆕 التأكيد التلقائي أولاً
+        await autoConfirmPendingVerifications();
+        
+        // ثم التوزيع
         await runDailyDistribution();
         break;
       }
@@ -2113,6 +2368,8 @@ cron.schedule("0 1 1 * *", async () => {
     await q("DELETE FROM code_view_assignments");
     await q("DELETE FROM codes");
     await q("DELETE FROM user_penalties");
+    await q("DELETE FROM confirmation_penalties");
+    await q("DELETE FROM verification_penalties");
     console.log("✅ تم مسح البيانات وبدء دورة جديدة");
   } catch (err) {
     console.error("❌ خطأ دورة جديدة:", err);
