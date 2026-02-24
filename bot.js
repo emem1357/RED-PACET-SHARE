@@ -1611,7 +1611,25 @@ bot.on("callback_query", async (ctx) => {
 
     if (action === "payment_resume_all") {
       await q(`UPDATE groups SET payment_mode_active=false, payment_mode_day=0, is_scheduler_active=true`);
-      await safeReply(ctx, `✅ تم استئناف التوزيع لجميع المجموعات\n\n▶️ الأكواد ستُوزع في موعدها`);
+      
+      // ✅ إرسال الكيبورد الكامل لجميع المستخدمين بعد استئناف التوزيع
+      const allUsers = await q(`SELECT telegram_id, auto_name FROM users`);
+      let resumeSuccess = 0;
+      for (const user of allUsers.rows) {
+        try {
+          const resumeKeyboard = await getDynamicKeyboard(user.telegram_id);
+          await bot.telegram.sendMessage(user.telegram_id,
+            `✅ تم استئناف توزيع الأكواد!\n\n` +
+            `▶️ يمكنك الآن استخدام الأكواد بشكل طبيعي\n\n` +
+            `📦 اكتب /اكواد_اليوم للحصول على كودك`,
+            resumeKeyboard
+          );
+          resumeSuccess++;
+          await new Promise(r => setTimeout(r, 100));
+        } catch (e) {}
+      }
+      
+      await safeReply(ctx, `✅ تم استئناف التوزيع لجميع المجموعات\n\n▶️ الأكواد ستُوزع في موعدها\n📢 تم إشعار ${resumeSuccess} مستخدم`);
       await ctx.answerCbQuery("✅ تم استئناف التوزيع");
       return;
     }
@@ -1731,7 +1749,25 @@ bot.on("callback_query", async (ctx) => {
     if (action.startsWith("payment_resume_group_")) {
       const groupId = action.replace("payment_resume_group_", "");
       await q(`UPDATE groups SET payment_mode_active=false, payment_mode_day=0, is_scheduler_active=true WHERE id=$1`, [groupId]);
-      await safeReply(ctx, `✅ تم استئناف التوزيع للمجموعة ${groupId.slice(0, 8)}`);
+      
+      // ✅ إرسال الكيبورد الكامل لمستخدمي المجموعة بعد استئناف التوزيع
+      const groupUsers = await q(`SELECT telegram_id, auto_name FROM users WHERE group_id=$1`, [groupId]);
+      let groupResumeSuccess = 0;
+      for (const user of groupUsers.rows) {
+        try {
+          const groupResumeKeyboard = await getDynamicKeyboard(user.telegram_id);
+          await bot.telegram.sendMessage(user.telegram_id,
+            `✅ تم استئناف توزيع الأكواد!\n\n` +
+            `▶️ يمكنك الآن استخدام الأكواد بشكل طبيعي\n\n` +
+            `📦 اكتب /اكواد_اليوم للحصول على كودك`,
+            groupResumeKeyboard
+          );
+          groupResumeSuccess++;
+          await new Promise(r => setTimeout(r, 100));
+        } catch (e) {}
+      }
+      
+      await safeReply(ctx, `✅ تم استئناف التوزيع للمجموعة ${groupId.slice(0, 8)}\n📢 تم إشعار ${groupResumeSuccess} مستخدم`);
       await ctx.answerCbQuery();
       return;
     }
