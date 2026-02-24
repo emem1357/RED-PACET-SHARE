@@ -208,16 +208,21 @@ async function getDynamicKeyboard(userId, groupId = null) {
       [Markup.button.text("/اكوادى"), Markup.button.text("✅ تأكيد الاستخدام")]
     );
     
-    // التحقق من يوم الدفع
+    // التحقق من يوم الدفع أو وضع الدفع النشط
     const groupSettings = await getGroupSettings(userGroupId);
-    const now = new Date();
-    const currentDay = now.getDate();
-    const paymentDay = groupSettings.payment_day || 1;
     
-    // إظهار زر الدفع في يوم الدفع أو ±2 أيام
-    const daysDiff = Math.abs(currentDay - paymentDay);
-    if (daysDiff <= 2 || daysDiff >= 26) { // 26 لتغطية نهاية/بداية الشهر
+    // إظهار زر الدفع إذا كان وضع الدفع نشطاً (أولوية قصوى)
+    if (groupSettings.payment_mode_active) {
       buttons.push([Markup.button.text("📸 إرسال إثبات الدفع")]);
+    } else {
+      // إظهار زر الدفع في يوم الدفع أو ±2 أيام
+      const now = new Date();
+      const currentDay = now.getDate();
+      const paymentDay = groupSettings.payment_day || 1;
+      const daysDiff = Math.abs(currentDay - paymentDay);
+      if (daysDiff <= 2 || daysDiff >= 26) { // 26 لتغطية نهاية/بداية الشهر
+        buttons.push([Markup.button.text("📸 إرسال إثبات الدفع")]);
+      }
     }
   }
   
@@ -1619,13 +1624,16 @@ bot.on("callback_query", async (ctx) => {
       let success = 0;
       for (const user of users.rows) {
         try {
+          // ✅ إرسال الكيبورد المحدث مع زر إثبات الدفع
+          const userKeyboard = await getDynamicKeyboard(user.telegram_id);
           await bot.telegram.sendMessage(user.telegram_id, 
             `💰 تذكير دفع الاشتراك الشهري\n\n` +
             `📅 الشهر: ${currentMonth}\n` +
             `👤 ${user.auto_name}\n\n` +
             `⏸️ تم إيقاف توزيع الأكواد مؤقتاً\n\n` +
             `📸 يرجى إرسال إثبات الدفع عبر زر "📸 إرسال إثبات الدفع"\n\n` +
-            `⚠️ لديك 3 أيام لإرسال الإثبات`
+            `⚠️ لديك 3 أيام لإرسال الإثبات`,
+            userKeyboard
           );
           success++;
           await new Promise(r => setTimeout(r, 100));
@@ -1737,12 +1745,14 @@ bot.on("callback_query", async (ctx) => {
       let success = 0;
       for (const user of users.rows) {
         try {
+          const userKeyboard2 = await getDynamicKeyboard(user.telegram_id);
           await bot.telegram.sendMessage(user.telegram_id,
             `💰 تذكير دفع الاشتراك الشهري\n\n` +
             `📅 الشهر: ${currentMonth}\n` +
             `👤 ${user.auto_name}\n\n` +
             `⏸️ تم إيقاف توزيع الأكواد مؤقتاً\n\n` +
-            `📸 يرجى إرسال إثبات الدفع`
+            `📸 يرجى إرسال إثبات الدفع`,
+            userKeyboard2
           );
           success++;
           await new Promise(r => setTimeout(r, 100));
@@ -2470,12 +2480,14 @@ cron.schedule("0 10 * * *", async () => {
           let success = 0;
           for (const user of users.rows) {
             try {
+              const cronKeyboard = await getDynamicKeyboard(user.telegram_id);
               await bot.telegram.sendMessage(user.telegram_id, 
                 `💰 تذكير دفع الاشتراك الشهري\n\n` +
                 `📅 الشهر: ${currentMonth}\n` +
                 `👤 ${user.auto_name}\n\n` +
                 `📸 يرجى إرسال إثبات الدفع عبر زر "📸 إرسال إثبات الدفع"\n\n` +
-                `⚠️ عدم الدفع خلال يومين سيؤدي لتحذير نهائي`
+                `⚠️ عدم الدفع خلال يومين سيؤدي لتحذير نهائي`,
+                cronKeyboard
               );
               success++;
               await new Promise(r => setTimeout(r, 100));
