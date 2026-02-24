@@ -201,26 +201,25 @@ async function getDynamicKeyboard(userId, groupId = null) {
     // المستخدم غير مسجل - إظهار أزرار التسجيل فقط
     buttons.push([Markup.button.text("/تسجيل")]);
   } else {
-    // المستخدم مسجل - إظهار الأزرار الرئيسية
     const userGroupId = groupId || userRes.rows[0].group_id;
-    buttons.push(
-      [Markup.button.text("/رفع_اكواد"), Markup.button.text("/اكواد_اليوم")],
-      [Markup.button.text("/اكوادى"), Markup.button.text("✅ تأكيد الاستخدام")]
-    );
-    
-    // التحقق من يوم الدفع أو وضع الدفع النشط
     const groupSettings = await getGroupSettings(userGroupId);
     
-    // إظهار زر الدفع إذا كان وضع الدفع نشطاً (أولوية قصوى)
+    // 🔴 وضع الدفع نشط: إظهار زر الدفع فقط وإخفاء كل الأزرار الأخرى
     if (groupSettings.payment_mode_active) {
       buttons.push([Markup.button.text("📸 إرسال إثبات الدفع")]);
     } else {
+      // ✅ وضع عادي: إظهار الأزرار الكاملة
+      buttons.push(
+        [Markup.button.text("/رفع_اكواد"), Markup.button.text("/اكواد_اليوم")],
+        [Markup.button.text("/اكوادى"), Markup.button.text("✅ تأكيد الاستخدام")]
+      );
+      
       // إظهار زر الدفع في يوم الدفع أو ±2 أيام
       const now = new Date();
       const currentDay = now.getDate();
       const paymentDay = groupSettings.payment_day || 1;
       const daysDiff = Math.abs(currentDay - paymentDay);
-      if (daysDiff <= 2 || daysDiff >= 26) { // 26 لتغطية نهاية/بداية الشهر
+      if (daysDiff <= 2 || daysDiff >= 26) {
         buttons.push([Markup.button.text("📸 إرسال إثبات الدفع")]);
       }
     }
